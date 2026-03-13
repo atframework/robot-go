@@ -1,0 +1,30 @@
+version: "3"
+
+includes:
+  config: config/Taskfile.yml
+
+tasks:
+  submodule_update:
+    desc: "Update Submodule"
+    cmds:
+      - git submodule update --init --recursive
+
+  generate-code:
+    desc: "Generate Code"
+    vars:
+      PYTHON_BIN_PATH: '{{.PYTHON_BIN_PATH }}'
+      RES_CONFIG_PB: '{{.RES_CONFIG_PB }}'
+      CONFIG_PROTOCOL_IMPORT_PATH: '{{.CONFIG_PROTOCOL_IMPORT_PATH }}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR }}'
+      PROJECT_ROOT: '{{.PROJECT_ROOT | default .ROOT_DIR}}'
+    cmds:
+      - task: config:generate-config-code
+        vars:
+          PROJECT_ROOT: '{{.PROJECT_ROOT}}'
+          PYTHON_BIN_PATH: "{{.PYTHON_BIN_PATH}}"
+          XRESLOADER_GEN_PYTHON: '{{.PROJECT_ROOT}}/third_party/xres-code-generator/xrescode-gen.py'
+          RES_CONFIG_PB: "{{.RES_CONFIG_PB}}"
+          CONFIG_PROTOCOL_IMPORT_PATH: "{{.CONFIG_PROTOCOL_IMPORT_PATH}}"
+          OUTPUT_DIR: "{{.OUTPUT_DIR}}"
+
+    dir: "{{.TASKFILE_DIR}}"

@@ -1,0 +1,3 @@
+[submodule "third_party/xres-code-generator"]
+	path = third_party/xres-code-generator
+	url = https://github.com/owent/xres-code-generator.git
