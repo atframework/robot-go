@@ -7,7 +7,8 @@ tasks:
     cmds:
       - |
         echo -e "\033[34;1m Generate Config Code... \033[0m"
-        rm -rf generate_config
-        "{{.PYTHON_BIN_PATH}}" "{{.XRESLOADER_GEN_PYTHON}}" -i "{{.PROJECT_ROOT}}/template" -p "{{.RES_CONFIG_PB}}" -o "{{.OUTPUT_DIR}}" '--set' 'config_protocol_import_path={{.CONFIG_PROTOCOL_IMPORT_PATH}}' -g config_group.go.mako:generate_config/config_group.go -g config_manager.go.mako:config_manager.go -l "config_set.go.mako:\${\"generate_config/config_set_{0}.go\".format(loader.get_go_pb_name())}" -t server
+        rm -rf '{{.OUTPUT_DIR}}'
+        mkdir -p '{{.OUTPUT_DIR}}'
+        "{{.PYTHON_BIN_PATH}}" "{{.XRESLOADER_GEN_PYTHON}}" -i "{{.PROJECT_ROOT}}/template" -p "{{.RES_CONFIG_PB}}" -o "{{.OUTPUT_DIR}}" '--set' 'config_protocol_import_path={{.CONFIG_PROTOCOL_IMPORT_PATH}}' -g config_group.go.mako:config_group.go -g config_manager.go.mako:config_manager.go -l "config_set.go.mako:\${\"config_set_{0}.go\".format(loader.get_go_pb_name())}" -t server
         echo -e "\033[34;1m Generate Config Code... done \033[0m"
     silent: true

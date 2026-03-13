@@ -25,7 +25,7 @@ import (
 	% endif
 % endfor
 	config_protocol "${import_path}"
-	xresloader_pb_header "github.com/atframework/robot-go/protocol/pb_header"
+	xresloader_pb_header "github.com/xresloader/xresloader/protocol/config"
 	"google.golang.org/protobuf/proto"
 )
 
