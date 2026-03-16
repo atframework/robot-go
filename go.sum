@@ -1,5 +1,5 @@
-github.com/atframework/atframe-utils-go v1.0.2 h1:kTsQnpzvFYJY+0b0GFWS/fMviKffwL+5l3sYnk33cEI=
-github.com/atframework/atframe-utils-go v1.0.2/go.mod h1:Nz9aqcllJkgj05rAoBMOhfQhoqUp/Xp636UX6OnJjuY=
+github.com/atframework/atframe-utils-go v1.0.3 h1:CSEROXnrK73la3uOJfXfWexSFmxIRh2rBeg1WZMcX1E=
+github.com/atframework/atframe-utils-go v1.0.3/go.mod h1:Nz9aqcllJkgj05rAoBMOhfQhoqUp/Xp636UX6OnJjuY=
 github.com/chzyer/logex v1.2.1 h1:XHDu3E6q+gdHgsdTPH6ImJMIp436vR6MPtH8gP05QzM=
 github.com/chzyer/logex v1.2.1/go.mod h1:JLbx6lG2kDbNRFnfkgvh4eRJRPX1QCoOIWomwysCBrQ=
 github.com/chzyer/readline v1.5.1 h1:upd/6fQk4src78LMRzh5vItIt361/o4uq553V8B5sGI=

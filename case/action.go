@@ -266,7 +266,10 @@ func CmdRunCase(_ base.TaskActionImpl, cmd []string) string {
 		logString := fmt.Sprintf("[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05.000"), openId, fmt.Sprintf(format, a...))
 		bufferWriter.Write(lu.StringtoBytes(logString))
 	}
-	defer bufferWriter.Close()
+	defer func() {
+		bufferWriter.Close()
+		bufferWriter.AwaitClose()
+	}()
 
 	for i := int64(0); i < batchCount; i++ {
 		// 创建TaskActionCase
