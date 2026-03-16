@@ -1,6 +1,7 @@
 package atsf4g_go_robot_user
 
 import (
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -66,4 +67,41 @@ func CreateUser(openId string, socketUrl string, logHandler func(format string, 
 		return nil
 	}
 	return createUserFn(openId, socketUrl, logHandler, enableActorLog)
+}
+
+var userMapContainerLock sync.RWMutex
+var userMapContainer = make(map[string]User)
+
+func UserContainerAddUser(u User) {
+	userMapContainerLock.Lock()
+	defer userMapContainerLock.Unlock()
+
+	userMapContainer[u.GetOpenId()] = u
+	u.AddOnClosedHandler(func(user User) {
+		UserContainerDelUser(user.GetOpenId(), user)
+	})
+}
+
+func UserContainerDelUser(openId string, checkUser User) {
+	userMapContainerLock.Lock()
+	defer userMapContainerLock.Unlock()
+
+	v, ok := userMapContainer[openId]
+	if !ok {
+		return
+	}
+	if v == checkUser {
+		delete(userMapContainer, openId)
+	}
+}
+
+func UserContainerGetUser(openId string) User {
+	userMapContainerLock.RLock()
+	defer userMapContainerLock.RUnlock()
+
+	v, ok := userMapContainer[openId]
+	if !ok {
+		return nil
+	}
+	return v
 }
