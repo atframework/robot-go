@@ -74,7 +74,7 @@ func NewTaskActionBase(timeoutDuration time.Duration, name string) *TaskActionBa
 	t := &TaskActionBase{
 		timeoutDuration: timeoutDuration,
 		Name:            name,
-		AwaitChannel:    make(chan *TaskActionResumeData),
+		AwaitChannel:    make(chan *TaskActionResumeData, 1),
 	}
 	return t
 }
@@ -158,6 +158,14 @@ func (t *TaskActionBase) AwaitTask(other TaskActionImpl) error {
 	if lu.IsNil(other) {
 		return fmt.Errorf("task nil")
 	}
+	if t.kill.Load() {
+		return fmt.Errorf("task action killed")
+	}
+	// 先设置等待数据，再注册回调，避免回调先于设置等待数据导致无法正确唤醒
+	t.awaitData = TaskActionAwaitData{
+		WaitingType: TaskActionAwaitTypeNormal,
+		WaitingId:   other.GetTaskId(),
+	}
 	other.InitOnFinish(func(err error) {
 		t.Resume(&TaskActionAwaitData{
 			WaitingType: TaskActionAwaitTypeNormal,
@@ -167,10 +175,7 @@ func (t *TaskActionBase) AwaitTask(other TaskActionImpl) error {
 			Data: nil,
 		})
 	})
-	resumeData := t.Yield(TaskActionAwaitData{
-		WaitingType: TaskActionAwaitTypeNormal,
-		WaitingId:   other.GetTaskId(),
-	})
+	resumeData := t.Yield(t.awaitData)
 	return resumeData.Err
 }
 
