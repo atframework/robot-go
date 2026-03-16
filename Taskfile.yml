@@ -16,13 +16,12 @@ tasks:
       RES_CONFIG_PB: '{{.RES_CONFIG_PB }}'
       CONFIG_PROTOCOL_IMPORT_PATH: '{{.CONFIG_PROTOCOL_IMPORT_PATH }}'
       OUTPUT_DIR: '{{.OUTPUT_DIR }}'
-      PROJECT_ROOT: '{{.PROJECT_ROOT | default .ROOT_DIR}}'
     cmds:
       - task: config:generate-config-code
         vars:
-          PROJECT_ROOT: '{{.PROJECT_ROOT}}'
+          PROJECT_ROOT: '{{.TASKFILE_DIR}}'
           PYTHON_BIN_PATH: "{{.PYTHON_BIN_PATH}}"
-          XRESLOADER_GEN_PYTHON: '{{.PROJECT_ROOT}}/third_party/xres-code-generator/xrescode-gen.py'
+          XRESLOADER_GEN_PYTHON: '{{.TASKFILE_DIR}}/third_party/xres-code-generator/xrescode-gen.py'
           RES_CONFIG_PB: "{{.RES_CONFIG_PB}}"
           CONFIG_PROTOCOL_IMPORT_PATH: "{{.CONFIG_PROTOCOL_IMPORT_PATH}}"
           OUTPUT_DIR: "{{.OUTPUT_DIR}}"
