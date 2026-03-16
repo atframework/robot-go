@@ -130,7 +130,11 @@ func (t *TaskActionBase) Finish(result error) {
 	if t.Timeout != nil {
 		t.Timeout.Stop()
 	}
-	t.Impl.Log("Finish %s", t.Name)
+	if result != nil {
+		t.Impl.Log("Finish %s with error: %v", t.Name, result)
+	} else {
+		t.Impl.Log("Finish %s", t.Name)
+	}
 	t.finishLock.Lock()
 	defer t.finishLock.Unlock()
 	t.finished = true

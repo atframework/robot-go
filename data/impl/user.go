@@ -84,7 +84,14 @@ func CreateUser(openId string, socketUrl string, logHandler func(format string, 
 	var bufferWriter *log.LogBufferedRotatingWriter
 	if enableActorLog {
 		bufferWriter, _ = log.NewLogBufferedRotatingWriter(nil,
-			fmt.Sprintf("../log/%s.%%N.log", openId), "", 20*1024*1024, 3, time.Second*3, 0)
+			fmt.Sprintf("../log/actor/%s.%%N.log", openId), "", 20*1024*1024, 3, time.Second*3, 0)
+	}
+	if logHandler == nil {
+		logBufferWriter, _ := log.NewLogBufferedRotatingWriter(nil,
+			fmt.Sprintf("../log/user/%s.%%N.log", openId), "", 5*1024*1024, 1, time.Second*3, 0)
+		logHandler = func(format string, a ...any) {
+			fmt.Fprintf(logBufferWriter, "%s %s", time.Now().Format("2006-01-02 15:04:05.000"), fmt.Sprintf(format, a...))
+		}
 	}
 	conn, _, err := websocket.DefaultDialer.Dial(socketUrl, nil)
 	if err != nil {

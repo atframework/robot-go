@@ -55,7 +55,7 @@ func (t *TaskActionCase) Log(format string, a ...any) {
 
 func init() {
 	var _ base.TaskActionImpl = &TaskActionCase{}
-	utils.RegisterCommand([]string{"run-case"}, CmdRunCase, "<case name> <openid-prefix> <user-count> <batch-count> <run-time> <args>", "运行用例", AutoCompleteCaseName, 0)
+	utils.RegisterCommand([]string{"run-case"}, CmdRunCase, "<case index> <case name> <openid-prefix> <user-count> <batch-count> <run-time> <args>", "运行用例", AutoCompleteCaseName, 0)
 }
 
 type CaseAction struct {
@@ -147,7 +147,7 @@ func RunCaseFile(caseFile string) error {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
-
+	caseIndex := 0
 	var pendingCase []chan string
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -173,6 +173,9 @@ func RunCaseFile(caseFile string) error {
 		if len(args) == 0 {
 			continue
 		}
+
+		caseIndex++
+		args = append([]string{strconv.FormatInt(int64(caseIndex), 10)}, args...)
 
 		waitingChan := make(chan string, 1)
 		go func() {
@@ -205,27 +208,32 @@ func RunCaseFile(caseFile string) error {
 }
 
 func CmdRunCase(_ base.TaskActionImpl, cmd []string) string {
-	if len(cmd) < 5 {
+	if len(cmd) < 6 {
 		return "Args Error"
 	}
 
-	caseName := cmd[0]
+	caseIndex, err := strconv.ParseInt(cmd[0], 10, 32)
+	if err != nil {
+		return err.Error()
+	}
+
+	caseName := cmd[1]
 	caseAction, ok := caseMapContainer[caseName]
 	if !ok {
 		return "Case Not Found"
 	}
 
-	openIdPrefix := cmd[1]
+	openIdPrefix := cmd[2]
 	if openIdPrefix == "" {
 		return "OpenId Prefix Empty"
 	}
 
-	userCount, err := strconv.ParseInt(cmd[2], 10, 32)
+	userCount, err := strconv.ParseInt(cmd[3], 10, 32)
 	if err != nil {
 		return err.Error()
 	}
 
-	batchCount, err := strconv.ParseInt(cmd[3], 10, 32)
+	batchCount, err := strconv.ParseInt(cmd[4], 10, 32)
 	if err != nil {
 		return err.Error()
 	}
@@ -236,7 +244,7 @@ func CmdRunCase(_ base.TaskActionImpl, cmd []string) string {
 		batchCount = userCount
 	}
 
-	runTime, err := strconv.ParseInt(cmd[4], 10, 32)
+	runTime, err := strconv.ParseInt(cmd[5], 10, 32)
 	if err != nil {
 		return err.Error()
 	}
@@ -261,7 +269,7 @@ func CmdRunCase(_ base.TaskActionImpl, cmd []string) string {
 	beginTime := time.Now()
 
 	bufferWriter, _ := log.NewLogBufferedRotatingWriter(nil,
-		fmt.Sprintf("../log/%s.%s.%%N.log", caseName, beginTime.Format("15.04.05")), "", 50*1024*1024, 5, time.Second*3, 0)
+		fmt.Sprintf("../log/%s.%d.%s.%%N.log", caseName, caseIndex, beginTime.Format("15.04.05")), "", 50*1024*1024, 5, time.Second*3, 0)
 	logHandler := func(openId string, format string, a ...any) {
 		logString := fmt.Sprintf("[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05.000"), openId, fmt.Sprintf(format, a...))
 		bufferWriter.Write(lu.StringtoBytes(logString))
@@ -270,6 +278,7 @@ func CmdRunCase(_ base.TaskActionImpl, cmd []string) string {
 		bufferWriter.Close()
 		bufferWriter.AwaitClose()
 	}()
+	logHandler("System", "Case[%s] Start Running, Total Count: %d, Batch Count: %d, Run Time: %d", caseName, totalCount.Load(), batchCount, runTime)
 
 	for i := int64(0); i < batchCount; i++ {
 		// 创建TaskActionCase
@@ -278,8 +287,8 @@ func CmdRunCase(_ base.TaskActionImpl, cmd []string) string {
 			Fn:             caseAction.fun,
 			logHandler:     logHandler,
 		}
-		if len(cmd) > 5 {
-			task.Args = cmd[5:]
+		if len(cmd) > 6 {
+			task.Args = cmd[6:]
 		}
 		task.TaskActionBase.Impl = task
 		caseActionChannel <- task
