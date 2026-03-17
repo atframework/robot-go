@@ -3,6 +3,7 @@ package atsf4g_go_robot_case
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -139,101 +140,101 @@ func RunCaseWait(pendingCase []chan string) error {
 	return nil
 }
 
-func RunCaseFile(caseFile string) error {
+func RunCaseFile(caseFile string, repeatedTime int32) error {
 	file, err := os.Open(caseFile)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	caseIndex := 0
-	var pendingCase []chan string
-	for scanner.Scan() {
-		line := scanner.Text()
-		if idx := strings.Index(line, "#"); idx >= 0 {
-			line = line[:idx]
+	beginTime := time.Now()
+	for index := int32(0); index < repeatedTime; index++ {
+		utils.StdoutLog(fmt.Sprintf("Run Case File: %s, Repeated Time: %d/%d", caseFile, index+1, repeatedTime))
+		if _, err = file.Seek(0, io.SeekStart); err != nil {
+			return err
 		}
-		line = strings.TrimSpace(line)
-		if len(line) == 0 {
-			continue
-		}
-
-		args := strings.Fields(line)
-		if len(args) == 0 {
-			continue
-		}
-
-		batchPending := false
-		if strings.ToLower(args[len(args)-1]) == "&" {
-			args = args[:len(args)-1]
-			batchPending = true
-		}
-
-		if len(args) == 0 {
-			continue
-		}
-
-		caseIndex++
-		args = append([]string{strconv.FormatInt(int64(caseIndex), 10)}, args...)
-
-		waitingChan := make(chan string, 1)
-		go func() {
-			waitingChan <- CmdRunCase(nil, args)
-		}()
-		pendingCase = append(pendingCase, waitingChan)
-
-		if batchPending {
-			continue
-		} else {
-			err = RunCaseWait(pendingCase)
-			if err != nil {
-				return err
+		scanner := bufio.NewScanner(file)
+		var caseIndex int32 = 0
+		var pendingCase []chan string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if idx := strings.Index(line, "#"); idx >= 0 {
+				line = line[:idx]
 			}
-			pendingCase = pendingCase[:0]
+			line = strings.TrimSpace(line)
+			if len(line) == 0 {
+				continue
+			}
+
+			args := strings.Fields(line)
+			if len(args) == 0 {
+				continue
+			}
+
+			batchPending := false
+			if strings.ToLower(args[len(args)-1]) == "&" {
+				args = args[:len(args)-1]
+				batchPending = true
+			}
+
+			if len(args) == 0 {
+				continue
+			}
+
+			caseIndex++
+			currentCaseIndex := caseIndex
+			waitingChan := make(chan string, 1)
+			go func() {
+				waitingChan <- CmdRunCaseFile(nil, args, currentCaseIndex, beginTime)
+			}()
+			pendingCase = append(pendingCase, waitingChan)
+
+			if batchPending {
+				continue
+			} else {
+				err = RunCaseWait(pendingCase)
+				if err != nil {
+					return err
+				}
+				pendingCase = pendingCase[:0]
+			}
 		}
-	}
 
-	err = RunCaseWait(pendingCase)
-	if err != nil {
-		return err
-	}
-	pendingCase = pendingCase[:0]
+		err = RunCaseWait(pendingCase)
+		if err != nil {
+			return err
+		}
 
-	if err := scanner.Err(); err != nil {
-		return err
+		if err := scanner.Err(); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func CmdRunCase(_ base.TaskActionImpl, cmd []string) string {
-	if len(cmd) < 6 {
+func CmdRunCaseFile(_ base.TaskActionImpl, cmd []string, caseIndex int32, beginTime time.Time) string {
+	if len(cmd) < 5 {
 		return "Args Error"
 	}
 
-	caseIndex, err := strconv.ParseInt(cmd[0], 10, 32)
-	if err != nil {
-		return err.Error()
-	}
-
-	caseName := cmd[1]
+	caseName := cmd[0]
 	caseAction, ok := caseMapContainer[caseName]
 	if !ok {
 		return "Case Not Found"
 	}
 
-	openIdPrefix := cmd[2]
+	openIdPrefix := cmd[1]
 	if openIdPrefix == "" {
 		return "OpenId Prefix Empty"
 	}
 
-	userCount, err := strconv.ParseInt(cmd[3], 10, 32)
+	userCount, err := strconv.ParseInt(cmd[2], 10, 32)
 	if err != nil {
 		return err.Error()
 	}
 
-	batchCount, err := strconv.ParseInt(cmd[4], 10, 32)
+	batchCount, err := strconv.ParseInt(cmd[3], 10, 32)
 	if err != nil {
 		return err.Error()
 	}
@@ -244,7 +245,7 @@ func CmdRunCase(_ base.TaskActionImpl, cmd []string) string {
 		batchCount = userCount
 	}
 
-	runTime, err := strconv.ParseInt(cmd[5], 10, 32)
+	runTime, err := strconv.ParseInt(cmd[4], 10, 32)
 	if err != nil {
 		return err.Error()
 	}
@@ -266,10 +267,8 @@ func CmdRunCase(_ base.TaskActionImpl, cmd []string) string {
 
 	caseActionChannel := make(chan *TaskActionCase, batchCount) // 限制并发数
 
-	beginTime := time.Now()
-
 	bufferWriter, _ := log.NewLogBufferedRotatingWriter(nil,
-		fmt.Sprintf("../log/%s.%d.%s.%%N.log", caseName, caseIndex, beginTime.Format("15.04.05")), "", 50*1024*1024, 5, time.Second*3, 0)
+		fmt.Sprintf("../log/%d.%s.%s.%%N.log", caseIndex, caseName, beginTime.Format("15.04.05")), "", 50*1024*1024, 3, time.Second*3, 0)
 	logHandler := func(openId string, format string, a ...any) {
 		logString := fmt.Sprintf("[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05.000"), openId, fmt.Sprintf(format, a...))
 		bufferWriter.Write(lu.StringtoBytes(logString))
@@ -287,8 +286,8 @@ func CmdRunCase(_ base.TaskActionImpl, cmd []string) string {
 			Fn:             caseAction.fun,
 			logHandler:     logHandler,
 		}
-		if len(cmd) > 6 {
-			task.Args = cmd[6:]
+		if len(cmd) > 5 {
+			task.Args = cmd[5:]
 		}
 		task.TaskActionBase.Impl = task
 		caseActionChannel <- task
@@ -335,8 +334,12 @@ func CmdRunCase(_ base.TaskActionImpl, cmd []string) string {
 	logHandler("System", "Case[%s] All Completed, Total Time: %s", caseName, useTime)
 
 	if TotalFailedCount.Load() != 0 {
-		return fmt.Sprintf("Complete With %d Failed Args: %v, Total Time: %s", TotalFailedCount.Load(), cmd, useTime)
+		return fmt.Sprintf("Complete With %d Failed Index:[%d] Args: %v, Total Time: %s", TotalFailedCount.Load(), caseIndex, cmd, useTime)
 	}
-	utils.StdoutLog(fmt.Sprintf("Complete All Success Args: %v, Total Time: %s", cmd, useTime))
+	utils.StdoutLog(fmt.Sprintf("Complete All Success Index:[%d] Args: %v, Total Time: %s", caseIndex, cmd, useTime))
 	return ""
+}
+
+func CmdRunCase(task base.TaskActionImpl, cmd []string) string {
+	return CmdRunCaseFile(task, cmd, 0, time.Now())
 }

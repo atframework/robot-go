@@ -334,10 +334,23 @@ func (user *User) SendReq(action *user_data.TaskActionUser, csMsg proto.Message,
 			titleString, pu.MessageReadableTextIndent(csHead), pu.MessageReadableTextIndent(csBody))
 	}
 
+	if needRsp {
+		awaitData := base.TaskActionAwaitData{
+			WaitingType: base.TaskActionAwaitTypeRPC,
+			WaitingId:   sequence,
+		}
+		action.AwaitData = awaitData
+	}
+
 	// Send an echo packet every second
 	err := user.connection.WriteMessage(websocket.BinaryMessage, csBin)
 	if err != nil {
 		user.Log("Error during writing to websocket: %v", err)
+		if needRsp {
+			if action.AwaitData.WaitingId == sequence && action.AwaitData.WaitingType == base.TaskActionAwaitTypeRPC {
+				action.AwaitData = base.TaskActionAwaitData{}
+			}
+		}
 		return 0, nil, err
 	}
 

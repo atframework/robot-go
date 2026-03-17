@@ -58,7 +58,7 @@ type TaskActionBase struct {
 	Name   string
 	TaskId uint64
 
-	awaitData       TaskActionAwaitData
+	AwaitData       TaskActionAwaitData
 	AwaitChannel    chan *TaskActionResumeData
 	timeoutDuration time.Duration
 	Timeout         *time.Timer
@@ -85,17 +85,17 @@ func (t *TaskActionBase) Yield(awaitData TaskActionAwaitData) *TaskActionResumeD
 			Err: fmt.Errorf("task action killed"),
 		}
 	}
-	t.awaitData = awaitData
+	t.AwaitData = awaitData
 	t.Impl.BeforeYield()
 	ret := <-t.AwaitChannel
-	t.awaitData.WaitingId = 0
-	t.awaitData.WaitingType = 0
+	t.AwaitData.WaitingId = 0
+	t.AwaitData.WaitingType = 0
 	t.Impl.AfterYield()
 	return ret
 }
 
 func (t *TaskActionBase) Resume(awaitData *TaskActionAwaitData, resumeData *TaskActionResumeData) {
-	if t.awaitData.WaitingId == awaitData.WaitingId && t.awaitData.WaitingType == awaitData.WaitingType {
+	if t.AwaitData.WaitingId == awaitData.WaitingId && t.AwaitData.WaitingType == awaitData.WaitingType {
 		t.AwaitChannel <- resumeData
 	}
 }
@@ -106,7 +106,7 @@ func (t *TaskActionBase) TimeoutKill() {
 	}
 	t.kill.Store(true)
 	t.Impl.Log("task timeout killed %s", t.Name)
-	if t.awaitData.WaitingId != 0 && t.awaitData.WaitingType != TaskActionAwaitTypeNone {
+	if t.AwaitData.WaitingId != 0 && t.AwaitData.WaitingType != TaskActionAwaitTypeNone {
 		t.AwaitChannel <- &TaskActionResumeData{
 			Err: fmt.Errorf("sys timeout"),
 		}
@@ -119,7 +119,7 @@ func (t *TaskActionBase) Kill() {
 	}
 	t.kill.Store(true)
 	t.Impl.Log("task killed %s", t.Name)
-	if t.awaitData.WaitingId != 0 && t.awaitData.WaitingType != TaskActionAwaitTypeNone {
+	if t.AwaitData.WaitingId != 0 && t.AwaitData.WaitingType != TaskActionAwaitTypeNone {
 		t.AwaitChannel <- &TaskActionResumeData{
 			Err: fmt.Errorf("killed"),
 		}
@@ -166,7 +166,7 @@ func (t *TaskActionBase) AwaitTask(other TaskActionImpl) error {
 		return fmt.Errorf("task action killed")
 	}
 	// 先设置等待数据，再注册回调，避免回调先于设置等待数据导致无法正确唤醒
-	t.awaitData = TaskActionAwaitData{
+	t.AwaitData = TaskActionAwaitData{
 		WaitingType: TaskActionAwaitTypeNormal,
 		WaitingId:   other.GetTaskId(),
 	}
@@ -179,7 +179,7 @@ func (t *TaskActionBase) AwaitTask(other TaskActionImpl) error {
 			Data: nil,
 		})
 	})
-	resumeData := t.Yield(t.awaitData)
+	resumeData := t.Yield(t.AwaitData)
 	return resumeData.Err
 }
 

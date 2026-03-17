@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	log "github.com/atframework/atframe-utils-go/log"
 	base "github.com/atframework/robot-go/base"
@@ -23,6 +24,7 @@ func NewRobotFlagSet() *flag.FlagSet {
 	flagSet.Bool("help", false, "show help")
 
 	flagSet.String("case_file", "", "case file path")
+	flagSet.Int("case_file_repeated", 1, "case file repeated time")
 	return flagSet
 }
 
@@ -46,7 +48,17 @@ func StartRobot(flagSet *flag.FlagSet, unpack user_interface.UserReceiveUnpackFu
 
 	caseFile := flagSet.Lookup("case_file").Value.String()
 	if caseFile != "" {
-		err := robot_case.RunCaseFile(caseFile)
+		repeatedTimeString := flagSet.Lookup("case_file_repeated").Value.String()
+		var repeatedTime int32 = 1
+		if repeatedTimeString != "" {
+			temp, err := strconv.Atoi(repeatedTimeString)
+			if err != nil {
+				fmt.Println("Invalid case_file_repeated value:", repeatedTimeString)
+				return
+			}
+			repeatedTime = int32(temp)
+		}
+		err := robot_case.RunCaseFile(caseFile, repeatedTime)
 		if err != nil {
 			fmt.Println("Run case file error:", err)
 			log.CloseAllLogWriters()
