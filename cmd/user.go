@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 
 	base "github.com/atframework/robot-go/base"
-	conn "github.com/atframework/robot-go/conn"
 	user_data "github.com/atframework/robot-go/data"
 	utils "github.com/atframework/robot-go/utils"
 	"github.com/chzyer/readline"
@@ -194,9 +193,7 @@ func CmdCreateUser(action base.TaskActionImpl, openId string) (user_data.User, e
 	userMapLock.Unlock()
 
 	// 创建角色
-	u := user_data.CreateUser(openId, action.Log, true, func() (conn.Connection, error) {
-		return conn.DialWebSocket(base.SocketUrl)
-	})
+	u := user_data.CreateUser(openId, action.Log, true)
 	if u == nil {
 		return nil, fmt.Errorf("Failed to create user")
 	}

@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	base "github.com/atframework/robot-go/base"
 	conn "github.com/atframework/robot-go/conn"
 	"google.golang.org/protobuf/proto"
 )
@@ -67,11 +68,11 @@ func RegisterCreateUser(f CreateUserFuncType,
 	}
 }
 
-func CreateUser(openId string, logHandler func(format string, a ...any), enableActorLog bool, connectFn conn.NewConnectFunc) User {
+func CreateUser(openId string, logHandler func(format string, a ...any), enableActorLog bool) User {
 	if createUserFn == nil {
 		return nil
 	}
-	return createUserFn(openId, logHandler, enableActorLog, connectFn)
+	return createUserFn(openId, logHandler, enableActorLog, base.ConnectFunc)
 }
 
 var userMapContainerLock sync.RWMutex
