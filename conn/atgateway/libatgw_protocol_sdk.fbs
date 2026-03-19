@@ -1,0 +1,275 @@
+// atgateway protocol schema file v2
+// Refactored: 2-message handshake (like libatbus node_register_req/rsp)
+// - kKeyExchangeReq: client sends ECDH public key + supported algorithms
+// - kKeyExchangeRsp: server sends ECDH public key + selected algorithm + session_id
+// Key refresh: re-run the same 2-message kHandshake exchange
+
+namespace atframework.gateway.v2;
+
+enum error_code_t:int {
+    kRefuseReconnect = -1005,
+    kSessionExpired = -1004,
+    kBusy = -1003,
+    kHandshake = -1002,
+    kFirstIdel = -1001,
+    kSuccess = 0,
+}
+
+enum handshake_step_t : ubyte {
+    kKeyExchangeReq = 0,    // Client -> Server: ECDH public key + all supported algorithms
+    kKeyExchangeRsp = 1,    // Server -> Client: ECDH public key + selected algorithm + session_id
+    kReconnectReq = 11,     // Client -> Server: reconnect with old session_id + full ECDH handshake inline (same fields as kKeyExchangeReq)
+    kReconnectRsp = 12,     // Server -> Client: reconnect result + full ECDH handshake inline (same fields as kKeyExchangeRsp), reuses session_id
+}
+
+enum access_data_algorithm_t : ubyte {
+  kHmacSha256 = 0,
+}
+
+enum kdf_algorithm_t : ubyte {
+  kHkdfSha256 = 0, // HKDF with SHA256
+}
+
+enum key_exchange_t : ubyte {
+  kNone = 0,          // no encryption
+  // golang standard library only supports ECDH
+  kX25519 = 1,     // x25519 (TLS 1.3 recommended)
+  kSecp256r1 = 2,  // secp256r1, p-256
+  kSecp384r1 = 3,  // secp384r1, p-384
+  kSecp521r1 = 4,  // secp521r1, p-521
+}
+
+enum crypto_algorithm_t : ubyte {
+  kNone = 0,
+  kXxtea = 1,
+  kAes128Cbc = 11, // PKCS#7
+  kAes192Cbc = 12, // PKCS#7
+  kAes256Cbc = 13, // PKCS#7
+  kAes128Gcm = 14, // AEAD
+  kAes192Gcm = 15, // AEAD
+  kAes256Gcm = 16, // AEAD
+
+  kChacha20 = 31,
+  kChacha20Poly1305Ietf = 32, // AEAD
+  kXchacha20Poly1305Ietf = 33, // AEAD
+}
+
+enum compression_algorithm_t : ubyte {
+  kNone = 0,
+
+  kZstd = 10,
+  kLz4 = 20,
+  kSnappy = 30,
+  kZlib = 40,
+}
+
+// Unified compression level definition for abstracting different compression algorithms.
+// Enum values express semantic level; concrete algorithm parameters are mapped by the implementation.
+enum compression_level_t : ubyte {
+  // Default: use each compression algorithm's recommended default
+  //
+  // Typical mapping:
+  //   zstd   : level 3
+  //   lz4    : fast default
+  //   snappy : default
+  //   zlib   : level 6
+  kDefault = 0,
+
+  // Storage first: lowest CPU overhead, allow storing without compression
+  //
+  // 典型映射：
+  //   zstd   : level 1 (or 0)
+  //   lz4    : fast(1)
+  //   snappy : default
+  //   zlib   : level 1
+  //   none   : no compression
+  kStorage = 10,
+
+  // Extreme speed, emphasize lowest CPU and latency
+  //
+  // 典型映射：
+  //   zstd   : level -1
+  //   lz4    : fast(1)
+  //   snappy : default
+  //   zlib   : level 1
+  kFast = 20,
+
+  // Low CPU overhead, slight tradeoff between performance and ratio
+  //
+  // 典型映射：
+  //   zstd   : level 1
+  //   lz4    : fast(3)
+  //   zlib   : level 3
+  kLowCpu = 30,
+
+  // Balanced compression, recommended general-purpose level
+  //
+  // 典型映射：
+  //   zstd   : level 3
+  //   lz4    : fast(6)
+  //   zlib   : level 6
+  kBalanced = 40,
+
+  // High compression ratio, storage-oriented, allows higher CPU cost
+  //
+  // 典型映射：
+  //   zstd   : level 6
+  //   lz4    : hc(9)
+  //   zlib   : level 9
+  kHighRatio = 50,
+
+  // Extreme compression, only for cold data or offline scenarios
+  //
+  // 典型映射：
+  //   zstd   : level 9 ~ 15
+  kMaxRatio = 60,
+}
+
+enum client_message_type_t : ubyte {
+    kUnknown = 0,
+    kPost = 1,
+    kHandshake = 2,
+    kPing = 3,
+    kPong = 4,
+    kKickoff = 5,
+    kConfirm = 6,
+}
+
+table client_message_head {
+    type: client_message_type_t(id: 0);
+    sequence: ulong(id: 1);
+}
+union client_message_body { cs_body_post, cs_body_kickoff, cs_body_ping, cs_body_handshake, cs_body_confirm }
+
+table cs_body_post_crypto {
+  algorithm: crypto_algorithm_t(id: 0);
+
+  // IV/nonce for crypto, must be unique for each encryption
+  // If not set, just use the default rotation/nonce rule of the algorithm
+  iv: [byte] (id: 1);
+
+  // AAD for AEAD
+  aad: [byte] (id: 2);
+}
+
+table cs_body_post_compression {
+  type: compression_algorithm_t (id: 0);
+  original_size: ulong (id: 1);
+}
+
+table cs_body_post {
+    crypto: cs_body_post_crypto (id: 0);
+
+    // Crypto note: encryption with dictionary headers may increase small data size.
+    // Each packet dynamically decides whether to encrypt; this field tells peer how to unpack.
+    compression: cs_body_post_compression (id: 1);
+
+    /// body size without padding
+    length: ulong (id: 2);
+    data: [byte] (id: 3);
+}
+
+table cs_body_kickoff {
+    reason: int (id: 0);
+    sub_reason: int (id: 1);
+    message: string (id: 2);
+}
+
+table cs_body_handshake_access_data {
+  algorithm : access_data_algorithm_t (id: 0);
+
+  timestamp: int64 (id: 1);  // unix timestamp
+
+  // 128bits nonce is enough
+  // - TLS 1.3: 96 bits
+  // - IPSec:   64 bits
+  // - JWT:     128 bits
+  // - UUID v4: 128 bits
+  nonce1: uint64 (id: 2);  // random
+  nonce2: uint64 (id: 3);  // random
+
+  // access_token plaintext format:
+  //   "<timestamp>:<nonce1>-<nonce2>:<session_id>:<key_exchange>:<hex(sha256(public_key))>"
+  //   or without encryption: "<timestamp>:<nonce1>-<nonce2>:<session_id>"
+  // abs(timestamp - current_time) <= 300
+  // signature = HMAC-SHA256(access_token_key, plaintext)
+  signature: [byte] (id: 4);
+}
+
+/// Handshake body for the 2-message key exchange (like libatbus register req/rsp).
+///
+/// kKeyExchangeReq (Client -> Server):
+///   - key_exchange: selected ECDH curve (must not be kNone for encrypted sessions)
+///   - algorithms[]: all cipher algorithms supported by the client
+///   - kdf_type[]: all KDF types supported by the client
+///   - public_key: client's ECDH ephemeral public key
+///   - access_data: HMAC-SHA256 authentication
+///   - compression_algorithm[]: all compression algorithms supported by client
+///
+/// kKeyExchangeRsp (Server -> Client):
+///   - session_id: newly assigned session ID
+///   - key_exchange: confirmed ECDH curve (echoed from req)
+///   - algorithms[]: single selected cipher algorithm
+///   - kdf_type[]: single selected KDF type
+///   - public_key: server's ECDH ephemeral public key
+///   - access_data: HMAC-SHA256 authentication
+///   - iv_size/tag_size: negotiated IV and tag sizes
+///   - compression_algorithm[]: single selected compression algorithm
+///   - max_post_message_size: maximum post message size in bytes
+///
+/// After both sides have each other's public key, they derive:
+///   shared_secret = ECDH(my_private, peer_public)
+///   key_material = HKDF(SHA256, shared_secret, nil, nil, key_size + iv_size)
+///   KEY = key_material[0..key_size-1]
+///   IV  = key_material[key_size..key_size+iv_size-1]
+table cs_body_handshake {
+    session_id: ulong (id: 0);
+    step: handshake_step_t (id: 1);
+    key_exchange: key_exchange_t (id: 2);
+    kdf_type: [kdf_algorithm_t] (id: 3);
+    algorithms: [crypto_algorithm_t] (id: 4);
+    access_data: [cs_body_handshake_access_data] (id: 5);
+
+    // ECDH ephemeral public key for this side of the handshake
+    public_key: [byte] (id: 6);
+
+    // Initialize crypto parameters, used to encode session_token.
+    initialize_crypto: cs_body_post_crypto (id: 7);
+
+    // Compression algorithms:
+    //   kKeyExchangeReq: all supported compression algorithms (empty if none)
+    //   kKeyExchangeRsp: single selected compression algorithm after negotiation
+    compression_algorithm: [compression_algorithm_t] (id: 8);
+
+    // Maximum post message size in bytes (server fills in rsp, default 2MB)
+    max_post_message_size: uint64 (id: 9);
+
+    // Session token for reconnect authentication (server fills in rsp)
+    session_token: [byte] (id: 10);
+
+    // Handshake sequence is used to confirm receiver cipher
+    handshake_sequence: ulong (id: 11);
+}
+
+table cs_body_confirm {
+  session_id: ulong (id: 0);
+
+  // Handshake sequence is used to confirm receiver cipher
+  handshake_sequence: ulong (id: 1);
+}
+
+table cs_body_ping {
+    /// the time when start ping
+    timepoint: long (id: 0);
+}
+
+/// message
+table client_message {
+    head: client_message_head (id: 0);
+    body: client_message_body (id: 2);
+}
+
+root_type client_message;
+
+file_identifier "ATGW";
+file_extension "atgw";

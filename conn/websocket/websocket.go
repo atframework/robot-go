@@ -1,6 +1,7 @@
 package conn
 
 import (
+	conn "github.com/atframework/robot-go/conn"
 	"github.com/gorilla/websocket"
 )
 
@@ -13,7 +14,7 @@ func NewWebSocketConnection(c *websocket.Conn) *WebSocketConnection {
 }
 
 // DialWebSocket is a ConnectFunc that creates a WebSocket connection.
-func DialWebSocket(url string) (Connection, error) {
+func DialWebSocket(url string) (conn.Connection, error) {
 	c, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		return nil, err

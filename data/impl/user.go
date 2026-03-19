@@ -211,7 +211,7 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 		rpcName, typeName, errorCode, csMsgHead, bodyBin, sequence, err = unpack(Msg)
 		if err != nil {
 			user.Log("<<<<<<<<<<<<<<<<<<<< Received: Error In Unpack %v <<<<<<<<<<<<<<<<<<<<", err)
-			user.Log("%s", prototext.Format(csMsgHead))
+			user.Log("Msg: %v MsgHead: %s", Msg, prototext.Format(csMsgHead))
 			continue
 		}
 
