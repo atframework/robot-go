@@ -146,6 +146,12 @@ font-size:11px;color:var(--accent)}
 border-radius:4px;padding:4px 8px;color:var(--text);font-size:12px}
 .ms-search input:focus{outline:none;border-color:var(--accent)}
 
+/* Submit Task page — textarea fills remaining viewport height */
+#page-submit.active{display:flex;flex-direction:column;height:calc(100vh - 140px)}
+#page-submit .form-card{flex:1;min-height:0;display:flex;flex-direction:column}
+#page-submit .form-card>.form-group:first-of-type{flex:1;min-height:0;display:flex;flex-direction:column}
+#taskContent{flex:1;min-height:0;resize:none}
+
 /* Responsive */
 @media(max-width:768px){
 .form-row{grid-template-columns:1fr}

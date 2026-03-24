@@ -36,9 +36,10 @@ type AgentConfig struct {
 
 // Agent 分布式压测执行端（主动向 Master 拉取任务）
 type Agent struct {
-	cfg    AgentConfig
-	writer *report_impl.RedisReportWriter
-	client *http.Client
+	cfg           AgentConfig
+	writer        *report_impl.RedisReportWriter
+	client        *http.Client
+	onlineMetrics *report_impl.MemoryMetricsCollector // 进程级 online_users，跨 task 持续采集
 }
 
 // NewAgent 创建 Agent 实例并连接 Redis
@@ -58,10 +59,17 @@ func NewAgent(cfg AgentConfig) (*Agent, error) {
 		return nil, err
 	}
 
+	om := report_impl.NewMemoryMetricsCollector()
+	om.Register("online_users", func() float64 {
+		return float64(user_data.OnlineUserCount())
+	})
+	om.StartAutoCollect(time.Second)
+
 	return &Agent{
-		cfg:    cfg,
-		writer: report_impl.NewRedisReportWriter(redisClient, cfg.AgentID),
-		client: &http.Client{Timeout: 40 * time.Second},
+		cfg:           cfg,
+		writer:        report_impl.NewRedisReportWriter(redisClient, cfg.AgentID),
+		client:        &http.Client{Timeout: 40 * time.Second},
+		onlineMetrics: om,
 	}, nil
 }
 
@@ -140,13 +148,11 @@ func (a *Agent) executeTask(task *robot_case.AgentTask) {
 	tracer := report_impl.NewMemoryTracer()
 	pressure := report_impl.NewMemoryPressureController()
 
-	// 在线用户指标
-	onlineMetricsCollector := report_impl.NewMemoryMetricsCollector()
-	onlineMetricsCollector.Register("online_users", func() float64 {
-		return float64(user_data.OnlineUserCount())
-	})
-	onlineMetricsCollector.Collect() // 立即采一次初始值
-	onlineMetricsCollector.StartAutoCollect(time.Second)
+	// 丢弃 task 开始前积累的 online_users 历史数据（agent 启动到 task 开始之间的数据不属于本次报告）
+	_ = a.onlineMetrics.Flush()
+
+	// 立即采一次在线用户初始值（持续采集已在 Agent 初始化时启动）
+	a.onlineMetrics.Collect()
 
 	// 创建 cancel context，用于取消机制
 	ctx, cancel := context.WithCancel(context.Background())
@@ -176,8 +182,8 @@ func (a *Agent) executeTask(task *robot_case.AgentTask) {
 
 	errMsg := robot_case.RunCaseStressWithContext(ctx, task.Params, tracer, pressure)
 
-	onlineMetricsCollector.StopAutoCollect()
-	onlineMetricsCollector.Collect() // 最终采集一次
+	// 最终再采集一次在线用户（持续采集不停止，只 flush 增量数据）
+	a.onlineMetrics.Collect()
 
 	// 停止 flush goroutine
 	cancel()
@@ -187,7 +193,8 @@ func (a *Agent) executeTask(task *robot_case.AgentTask) {
 	tracings := tracer.Flush()
 	var metricsData []*report.MetricsSeries
 
-	snapshots := pressure.Snapshots()
+	// 使用 FlushSnapshots 只取本次任务新增的快照，避免重复写入
+	snapshots := pressure.FlushSnapshots()
 	if len(snapshots) > 0 {
 		var pressurePts, throttlePts, actualQPSPts []report.MetricsPoint
 		for _, s := range snapshots {
@@ -202,14 +209,13 @@ func (a *Agent) executeTask(task *robot_case.AgentTask) {
 		)
 	}
 
-	// online_users 指标（按 Agent 维度，不区分 Case）
-	onlineMetrics := onlineMetricsCollector.Flush()
+	// online_users：Flush 取本轮新增采样点（agent 级持续采集，每 task 写入增量）
+	onlineMetrics := a.onlineMetrics.Flush()
 	for _, s := range onlineMetrics {
 		if s.Labels == nil {
 			s.Labels = make(map[string]string)
 		}
 		s.Labels["agent"] = a.cfg.AgentID
-		// 不附加 case 标签：online_users 是进程级总在线数，与 case 无关
 	}
 	metricsData = append(metricsData, onlineMetrics...)
 
@@ -302,7 +308,8 @@ func (a *Agent) flushPartialData(reportID string, caseName string, tracer *repor
 		}
 	}
 
-	snapshots := pressure.Snapshots()
+	// 使用 FlushSnapshots 只取增量快照，避免 partial flush 重复写入已提交数据
+	snapshots := pressure.FlushSnapshots()
 	if len(snapshots) > 0 {
 		var metricsData []*report.MetricsSeries
 		var pressurePts, throttlePts, actualQPSPts []report.MetricsPoint

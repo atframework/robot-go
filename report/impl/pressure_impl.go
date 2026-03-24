@@ -128,6 +128,15 @@ func (p *MemoryPressureController) Snapshots() []report.PressureSnapshot {
 	return cp
 }
 
+// FlushSnapshots 返回自上次 Flush 以来新增的快照并清空内部缓冲，避免重复写入。
+func (p *MemoryPressureController) FlushSnapshots() []report.PressureSnapshot {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	snaps := p.snapshots
+	p.snapshots = nil
+	return snaps
+}
+
 func (p *MemoryPressureController) detect() {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)

@@ -36,7 +36,7 @@ func (w *JSONFileWriter) WriteMetrics(reportID string, series []*report.MetricsS
 	if len(series) == 0 {
 		return nil
 	}
-	return w.appendJSON(reportID, "metrics.json", series)
+	return w.writeJSON(reportID, "metrics.json", series)
 }
 
 func (w *JSONFileWriter) WriteMeta(meta *report.ReportMeta) error {

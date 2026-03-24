@@ -323,12 +323,11 @@ func (m *Master) aggregateAndGenerate(reportID string) error {
 	redisWriter := report_impl.NewRedisReportWriter(m.redis, "master")
 	_ = redisWriter.WriteMeta(&data.Meta)
 
-	// 写入到本地 JSON 备份
+	// 写入到本地 JSON 备份（展开的指标，不写入原始打点以减小磁盘占用）
 	outDir := filepath.Join(m.cfg.ReportDir, reportID)
 	_ = os.MkdirAll(outDir, 0750)
 	localWriter := report_impl.NewJSONFileWriter(m.cfg.ReportDir)
 	_ = localWriter.WriteMeta(&data.Meta)
-	_ = localWriter.WriteTracings(reportID, data.Tracings)
 	_ = localWriter.WriteMetrics(reportID, data.Metrics)
 
 	// 生成 HTML

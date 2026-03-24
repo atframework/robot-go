@@ -71,12 +71,9 @@ func FinalizeReport() {
 		}
 	}
 
-	// 写入 JSON
+	// 写入 JSON（仅备份元数据和清洗后的指标，不写入原始打点数据以减小磁盘占用）
 	if err := mgr.Writer.WriteMeta(meta); err != nil {
 		fmt.Println("Write report meta error:", err)
-	}
-	if err := mgr.Writer.WriteTracings(mgr.ReportID, tracings); err != nil {
-		fmt.Println("Write tracings error:", err)
 	}
 	if err := mgr.Writer.WriteMetrics(mgr.ReportID, metricsData); err != nil {
 		fmt.Println("Write metrics error:", err)

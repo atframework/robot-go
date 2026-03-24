@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/atframework/robot-go/report"
@@ -67,11 +68,12 @@ type metricsSection struct {
 
 // metricsDataEntry 为指标下拉筛选提供的 JS 可用数据
 type metricsDataEntry struct {
-	Name      string    `json:"name"`
-	CaseGroup string    `json:"caseGroup"`
-	Labels    string    `json:"labels"`
-	Times     []string  `json:"times"`
-	Values    []float64 `json:"values"`
+	Name       string    `json:"name"`
+	CaseGroup  string    `json:"caseGroup"`
+	AgentGroup string    `json:"agentGroup"`
+	Labels     string    `json:"labels"`
+	Times      []string  `json:"times"`
+	Values     []float64 `json:"values"`
 }
 
 // chartSeriesData 按秒聚合的单条 case 时间序列
@@ -135,11 +137,18 @@ func (g *EChartsHTMLGenerator) buildTemplateData(data *report.ReportData) *templ
 		OnlineUsersJSON: template.JS(`null`),
 	}
 
+	startTime := data.Meta.StartTime
+	endTime := data.Meta.EndTime
+
 	if len(data.Tracings) > 0 {
 		g.processTracings(td, data.Tracings)
 	}
 	if len(data.Metrics) > 0 {
-		g.processMetrics(td, data.Metrics)
+		g.processMetrics(td, data.Metrics, startTime, endTime)
+	}
+	// tracings 为空时（已清洗保存），从 cleaned metrics 重建图表和汇总表
+	if td.TotalReqs == 0 && len(data.Metrics) > 0 {
+		g.buildChartsFromMetrics(td, data.Metrics, startTime, endTime)
 	}
 	return td
 }
@@ -159,7 +168,7 @@ func (g *EChartsHTMLGenerator) processTracings(td *templateData, records []*repo
 
 	// --- 全局统计 ---
 	allDurations := make([]int64, 0, len(records))
-	globalErrorCodes := make(map[int32]int)
+	globalErrorCodes := make(map[string]int)
 	var totalMs int64
 	for _, r := range records {
 		totalMs += r.DurationMs
@@ -168,7 +177,11 @@ func (g *EChartsHTMLGenerator) processTracings(td *templateData, records []*repo
 			td.SuccessReqs++
 		} else {
 			td.FailedReqs++
-			globalErrorCodes[r.Code]++
+			label := fmt.Sprintf("code_%d", r.Code)
+			if msg, ok := r.Extra["error"]; ok && msg != "" {
+				label = msg
+			}
+			globalErrorCodes[label]++
 		}
 	}
 	if td.TotalReqs > 0 {
@@ -276,14 +289,18 @@ func (g *EChartsHTMLGenerator) processTracings(td *templateData, records []*repo
 			sd.P99Ms[i] = percentile(b.durs, 99)
 		}
 		// 每个 case 独立的错误码统计（供 case 筛选下拉框过滤饼图）
-		caseErrs := make(map[int32]int)
+		caseErrs := make(map[string]int)
 		for _, r := range caseRecords[name] {
 			if r.Code != report.TracingSuccess {
-				caseErrs[r.Code]++
+				label := fmt.Sprintf("code_%d", r.Code)
+				if msg, ok := r.Extra["error"]; ok && msg != "" {
+					label = msg
+				}
+				caseErrs[label]++
 			}
 		}
-		for code, cnt := range caseErrs {
-			sd.Errors = append(sd.Errors, errorCodeEntry{Name: fmt.Sprintf("code_%d", code), Value: cnt})
+		for errLabel, cnt := range caseErrs {
+			sd.Errors = append(sd.Errors, errorCodeEntry{Name: errLabel, Value: cnt})
 		}
 		cd.Series = append(cd.Series, sd)
 	}
@@ -293,23 +310,77 @@ func (g *EChartsHTMLGenerator) processTracings(td *templateData, records []*repo
 
 	// --- 错误码 ---
 	errorCodes := make([]errorCodeEntry, 0, len(globalErrorCodes))
-	for code, cnt := range globalErrorCodes {
-		errorCodes = append(errorCodes, errorCodeEntry{Name: fmt.Sprintf("code_%d", code), Value: cnt})
+	for label, cnt := range globalErrorCodes {
+		errorCodes = append(errorCodes, errorCodeEntry{Name: label, Value: cnt})
 	}
 	ecJSON, _ := json.Marshal(errorCodes)
 	td.ErrorCodesJSON = template.JS(ecJSON)
 }
 
-func (g *EChartsHTMLGenerator) processMetrics(td *templateData, series []*report.MetricsSeries) {
+// seriesKey 构建唯一键：name + 排序后的 label pairs
+func seriesKey(s *report.MetricsSeries) string {
+	keys := make([]string, 0, len(s.Labels))
+	for k := range s.Labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, 1+len(keys))
+	parts = append(parts, s.Name)
+	for _, k := range keys {
+		parts = append(parts, k+"="+s.Labels[k])
+	}
+	return strings.Join(parts, "\x00")
+}
+
+// mergeMetricSeries 合并相同 name+labels 的多条系列（来自多次 RPush 刷新），结果按时间戳排序。
+func mergeMetricSeries(series []*report.MetricsSeries) []*report.MetricsSeries {
+	type entry struct {
+		s   *report.MetricsSeries
+		pts []report.MetricsPoint
+	}
+	merged := make(map[string]*entry)
+	order := make([]string, 0, len(series))
+	for _, s := range series {
+		key := seriesKey(s)
+		if e, ok := merged[key]; ok {
+			e.pts = append(e.pts, s.Points...)
+		} else {
+			pts := make([]report.MetricsPoint, len(s.Points))
+			copy(pts, s.Points)
+			merged[key] = &entry{s: s, pts: pts}
+			order = append(order, key)
+		}
+	}
+	result := make([]*report.MetricsSeries, 0, len(order))
+	for _, key := range order {
+		e := merged[key]
+		sort.Slice(e.pts, func(i, j int) bool {
+			return e.pts[i].Timestamp.Before(e.pts[j].Timestamp)
+		})
+		result = append(result, &report.MetricsSeries{
+			Name:   e.s.Name,
+			Labels: e.s.Labels,
+			Points: e.pts,
+		})
+	}
+	return result
+}
+
+func (g *EChartsHTMLGenerator) processMetrics(td *templateData, series []*report.MetricsSeries, startTime, endTime time.Time) {
+	// 合并相同 name+labels 的系列（来自多次局部 FlushSnapshots RPush）
+	series = mergeMetricSeries(series)
 	var onlineUsersSeries, otherSeries []*report.MetricsSeries
 	for _, s := range series {
-		if len(s.Points) == 0 {
+		// 按时间范围过滤数据点
+		filtered := filterMetricPoints(s.Points, startTime, endTime)
+		if len(filtered) == 0 {
 			continue
 		}
+		sc := &report.MetricsSeries{Name: s.Name, Labels: s.Labels, Points: filtered}
 		if s.Name == "online_users" {
-			onlineUsersSeries = append(onlineUsersSeries, s)
+			onlineUsersSeries = append(onlineUsersSeries, sc)
 		} else {
-			otherSeries = append(otherSeries, s)
+			otherSeries = append(otherSeries, sc)
 		}
 	}
 	g.processOnlineUsers(td, onlineUsersSeries)
@@ -330,7 +401,7 @@ func (g *EChartsHTMLGenerator) processMetrics(td *templateData, series []*report
 		}
 		labelsStr := ""
 		for k, v := range s.Labels {
-			if k == "case" {
+			if k == "case" || k == "agent" {
 				continue
 			}
 			if labelsStr != "" {
@@ -339,11 +410,12 @@ func (g *EChartsHTMLGenerator) processMetrics(td *templateData, series []*report
 			labelsStr += k + "=" + v
 		}
 		entries = append(entries, metricsDataEntry{
-			Name:      s.Name,
-			CaseGroup: s.Labels["case"],
-			Labels:    labelsStr,
-			Times:     times,
-			Values:    values,
+			Name:       s.Name,
+			CaseGroup:  s.Labels["case"],
+			AgentGroup: s.Labels["agent"],
+			Labels:     labelsStr,
+			Times:      times,
+			Values:     values,
 		})
 		td.MetricsSections = append(td.MetricsSections, metricsSection{}) // 只用于判断是否有数据
 	}
@@ -353,17 +425,225 @@ func (g *EChartsHTMLGenerator) processMetrics(td *templateData, series []*report
 	}
 }
 
+// filterMetricPoints 返回 [startTime, endTime] 内的数据点；零值时间表示不限制该端。
+func filterMetricPoints(points []report.MetricsPoint, start, end time.Time) []report.MetricsPoint {
+	if start.IsZero() && end.IsZero() {
+		return points
+	}
+	result := make([]report.MetricsPoint, 0, len(points))
+	for _, p := range points {
+		if !start.IsZero() && p.Timestamp.Before(start) {
+			continue
+		}
+		if !end.IsZero() && p.Timestamp.After(end) {
+			continue
+		}
+		result = append(result, p)
+	}
+	return result
+}
+
+// buildChartsFromMetrics 当 tracings 为空时，从 cleaned tracing metrics重建图表和汇总表。
+// 依赖 CleanTracingsToMetrics 生成的 {case}_qps / _success_qps / _failed_qps /
+// _avg_ms / _p50_ms / _p90_ms / _p99_ms 系列。
+func (g *EChartsHTMLGenerator) buildChartsFromMetrics(td *templateData, series []*report.MetricsSeries, startTime, endTime time.Time) {
+	type caseTimeSeries struct {
+		qps      map[string]float64
+		successQ map[string]float64
+		failedQ  map[string]float64
+		avgMs    map[string]float64
+		p50Ms    map[string]float64
+		p90Ms    map[string]float64
+		p99Ms    map[string]float64
+	}
+	newCTS := func() *caseTimeSeries {
+		return &caseTimeSeries{
+			qps: make(map[string]float64), successQ: make(map[string]float64),
+			failedQ: make(map[string]float64), avgMs: make(map[string]float64),
+			p50Ms: make(map[string]float64), p90Ms: make(map[string]float64),
+			p99Ms: make(map[string]float64),
+		}
+	}
+
+	knownSuffixes := []string{"_qps", "_success_qps", "_failed_qps", "_avg_ms", "_p50_ms", "_p90_ms", "_p99_ms", "_success_rate"}
+
+	caseOrder := make([]string, 0)
+	caseMap := make(map[string]*caseTimeSeries)
+	allSecsSet := make(map[string]bool)
+
+	for _, s := range series {
+		caseName := s.Labels["case"]
+		if caseName == "" {
+			continue
+		}
+		// 确认是 cleaned tracing 指标
+		var matchedSuffix string
+		for _, sfx := range knownSuffixes {
+			if s.Name == caseName+sfx {
+				matchedSuffix = sfx
+				break
+			}
+		}
+		if matchedSuffix == "" {
+			continue
+		}
+		if _, ok := caseMap[caseName]; !ok {
+			caseOrder = append(caseOrder, caseName)
+			caseMap[caseName] = newCTS()
+		}
+		cts := caseMap[caseName]
+		for _, pt := range filterMetricPoints(s.Points, startTime, endTime) {
+			t := pt.Timestamp.Format("15:04:05")
+			allSecsSet[t] = true
+			switch matchedSuffix {
+			case "_qps":
+				cts.qps[t] = pt.Value
+			case "_success_qps":
+				cts.successQ[t] = pt.Value
+			case "_failed_qps":
+				cts.failedQ[t] = pt.Value
+			case "_avg_ms":
+				cts.avgMs[t] = pt.Value
+			case "_p50_ms":
+				cts.p50Ms[t] = pt.Value
+			case "_p90_ms":
+				cts.p90Ms[t] = pt.Value
+			case "_p99_ms":
+				cts.p99Ms[t] = pt.Value
+			}
+		}
+	}
+	if len(caseOrder) == 0 {
+		return
+	}
+
+	// 构建时间标签序列
+	timeLabels := make([]string, 0, len(allSecsSet))
+	for t := range allSecsSet {
+		timeLabels = append(timeLabels, t)
+	}
+	sort.Strings(timeLabels)
+	timeIdx := make(map[string]int, len(timeLabels))
+	for i, t := range timeLabels {
+		timeIdx[t] = i
+	}
+
+	n := len(timeLabels)
+	cd := chartData{TimeLabels: timeLabels}
+
+	for _, caseName := range caseOrder {
+		cts := caseMap[caseName]
+		sd := chartSeriesData{
+			Name:    caseName,
+			QPS:     make([]int, n),
+			Success: make([]int, n),
+			Failed:  make([]int, n),
+			AvgMs:   make([]float64, n),
+			P50Ms:   make([]int64, n),
+			P90Ms:   make([]int64, n),
+			P99Ms:   make([]int64, n),
+		}
+		var totalReqs, totalSuccess, totalFailed int
+		var sumAvg float64
+		var sumP50, sumP90, sumP99 int64
+		var cntP int
+		for t, i := range timeIdx {
+			q := int(math.Round(cts.qps[t]))
+			succ := int(math.Round(cts.successQ[t]))
+			fail := int(math.Round(cts.failedQ[t]))
+			sd.QPS[i] = q
+			sd.Success[i] = succ
+			sd.Failed[i] = fail
+			sd.AvgMs[i] = math.Round(cts.avgMs[t]*10) / 10
+			sd.P50Ms[i] = int64(math.Round(cts.p50Ms[t]))
+			sd.P90Ms[i] = int64(math.Round(cts.p90Ms[t]))
+			sd.P99Ms[i] = int64(math.Round(cts.p99Ms[t]))
+			totalReqs += q
+			totalSuccess += succ
+			totalFailed += fail
+			if q > 0 {
+				sumAvg += cts.avgMs[t] * float64(q)
+				sumP50 += int64(math.Round(cts.p50Ms[t]))
+				sumP90 += int64(math.Round(cts.p90Ms[t]))
+				sumP99 += int64(math.Round(cts.p99Ms[t]))
+				cntP++
+			}
+		}
+		cd.Series = append(cd.Series, sd)
+
+		// 构建汇总表行（基于每秒指标近似计算）
+		cs := caseStat{Name: caseName, Total: totalReqs, Success: totalSuccess, Failed: totalFailed}
+		if cntP > 0 {
+			cs.AvgMs = math.Round(sumAvg/float64(totalReqs)*10) / 10
+			cs.P50Ms = sumP50 / int64(cntP)
+			cs.P90Ms = sumP90 / int64(cntP)
+			cs.P99Ms = sumP99 / int64(cntP)
+		}
+		td.CaseStats = append(td.CaseStats, cs)
+		td.TotalReqs += totalReqs
+		td.SuccessReqs += totalSuccess
+		td.FailedReqs += totalFailed
+	}
+
+	// 全局延迟近似：取各 case 加权平均
+	if td.TotalReqs > 0 {
+		var wAvg float64
+		var wP50, wP90, wP99 float64
+		for _, cs := range td.CaseStats {
+			w := float64(cs.Total)
+			wAvg += cs.AvgMs * w
+			wP50 += float64(cs.P50Ms) * w
+			wP90 += float64(cs.P90Ms) * w
+			wP99 += float64(cs.P99Ms) * w
+		}
+		total := float64(td.TotalReqs)
+		td.AvgMs = math.Round(wAvg/total*10) / 10
+		td.P50Ms = math.Round(wP50/total*10) / 10
+		td.P90Ms = math.Round(wP90/total*10) / 10
+		td.P99Ms = math.Round(wP99/total*10) / 10
+	}
+
+	cdJSON, _ := json.Marshal(cd)
+	td.ChartDataJSON = template.JS(cdJSON)
+}
+
 // processOnlineUsers 将全部 online_users 系列合并成一张多系列折线图的 JSON。
-// 每个 Agent 一条线（按 agent 标签区分），并附加一条汇总的 Total 线。
+// 每个 Agent 一条线（按 agent 标签区分，同一 Agent 多批数据合并为一条），并附加一条汇总的 Total 线。
 func (g *EChartsHTMLGenerator) processOnlineUsers(td *templateData, series []*report.MetricsSeries) {
 	if len(series) == 0 {
 		return
 	}
+
+	// 按 agent 名称聚合：同一 Agent 的多条系列合并，相同时间戳覆盖取最新值
+	type agentPoints struct {
+		name   string
+		points map[string]float64 // "15:04:05" -> value
+	}
+	agentOrder := make([]string, 0)
+	agentMap := make(map[string]*agentPoints)
+
+	for _, s := range series {
+		name := "online_users"
+		if v, ok := s.Labels["agent"]; ok && v != "" {
+			name = v
+		}
+		ap, exists := agentMap[name]
+		if !exists {
+			ap = &agentPoints{name: name, points: make(map[string]float64)}
+			agentOrder = append(agentOrder, name)
+			agentMap[name] = ap
+		}
+		for _, pt := range s.Points {
+			t := pt.Timestamp.Format("15:04:05")
+			ap.points[t] = math.Round(pt.Value*100) / 100
+		}
+	}
+
 	// 收集全部时间点
 	timeSet := make(map[string]bool)
-	for _, s := range series {
-		for _, pt := range s.Points {
-			timeSet[pt.Timestamp.Format("15:04:05")] = true
+	for _, ap := range agentMap {
+		for t := range ap.points {
+			timeSet[t] = true
 		}
 	}
 	timeLabelsSorted := make([]string, 0, len(timeSet))
@@ -371,10 +651,6 @@ func (g *EChartsHTMLGenerator) processOnlineUsers(td *templateData, series []*re
 		timeLabelsSorted = append(timeLabelsSorted, t)
 	}
 	sort.Strings(timeLabelsSorted)
-	timeIdx := make(map[string]int, len(timeLabelsSorted))
-	for i, t := range timeLabelsSorted {
-		timeIdx[t] = i
-	}
 
 	type ouEntry struct {
 		Name   string    `json:"name"`
@@ -386,26 +662,23 @@ func (g *EChartsHTMLGenerator) processOnlineUsers(td *templateData, series []*re
 	}
 	cd := ouChartData{TimeLabels: timeLabelsSorted}
 	total := make([]float64, len(timeLabelsSorted))
-	for _, s := range series {
+
+	for _, name := range agentOrder {
+		ap := agentMap[name]
 		values := make([]float64, len(timeLabelsSorted))
-		for _, pt := range s.Points {
-			t := pt.Timestamp.Format("15:04:05")
-			if idx, ok := timeIdx[t]; ok {
-				values[idx] = math.Round(pt.Value*100) / 100
+		for i, t := range timeLabelsSorted {
+			if v, ok := ap.points[t]; ok {
+				values[i] = v
 			}
 		}
-		name := "online_users"
-		if v, ok := s.Labels["agent"]; ok && v != "" {
-			name = v
-		}
-		// 不附加 case 标签：online_users 是进程级指标
 		cd.Series = append(cd.Series, ouEntry{Name: name, Values: values})
 		for i, v := range values {
 			total[i] += v
 		}
 	}
+
 	// 多于一个 Agent 时才显示 Total
-	if len(series) > 1 {
+	if len(agentOrder) > 1 {
 		rounded := make([]float64, len(total))
 		for i, v := range total {
 			rounded[i] = math.Round(v*100) / 100
@@ -515,10 +788,18 @@ table.st tr:hover{background:#f5f5ff}
 
   {{if .MetricsSections}}
   <div class="stit">指标 (Metrics)</div>
-  <div class="bx" style="display:flex;align-items:center;gap:12px;padding:10px 18px">
-    <label style="font-weight:600;font-size:13px;color:#555">选择指标：</label>
-    <select id="metricFilter" style="padding:6px 12px;border:1px solid #d9d9d9;border-radius:4px;font-size:13px;min-width:200px;cursor:pointer">
-      <option value="">全部指标</option>
+  <div class="bx" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:10px 18px">
+    <label style="font-weight:600;font-size:13px;color:#555">Case：</label>
+    <select id="metricCaseFilter" style="padding:6px 12px;border:1px solid #d9d9d9;border-radius:4px;font-size:13px;min-width:160px;cursor:pointer">
+      <option value="">全部</option>
+    </select>
+    <label style="font-weight:600;font-size:13px;color:#555">Agent：</label>
+    <select id="metricAgentFilter" style="padding:6px 12px;border:1px solid #d9d9d9;border-radius:4px;font-size:13px;min-width:160px;cursor:pointer">
+      <option value="">全部</option>
+    </select>
+    <label style="font-weight:600;font-size:13px;color:#555">指标名：</label>
+    <select id="metricFilter" style="padding:6px 12px;border:1px solid #d9d9d9;border-radius:4px;font-size:13px;min-width:180px;cursor:pointer">
+      <option value="">全部</option>
     </select>
   </div>
   <div id="mc"></div>
@@ -648,33 +929,53 @@ var M={{.MetricsJSON}};
 if(!M)M=[];
 (function(){
   var metSel=document.getElementById('metricFilter');
-  if(metSel&&M.length>0){
-    var seen={};
+  var caseSel=document.getElementById('metricCaseFilter');
+  var agentSel=document.getElementById('metricAgentFilter');
+  if(M.length>0){
+    var seenN={},seenC={},seenA={};
     M.forEach(function(m){
-      if(!seen[m.name]){seen[m.name]=true;
-        var o=document.createElement('option');o.value=m.name;o.textContent=m.name;metSel.appendChild(o);
-      }
+      if(metSel&&!seenN[m.name]){seenN[m.name]=true;
+        var o=document.createElement('option');o.value=m.name;o.textContent=m.name;metSel.appendChild(o);}
+      if(caseSel&&m.caseGroup&&!seenC[m.caseGroup]){seenC[m.caseGroup]=true;
+        var o=document.createElement('option');o.value=m.caseGroup;o.textContent=m.caseGroup;caseSel.appendChild(o);}
+      if(agentSel&&m.agentGroup&&!seenA[m.agentGroup]){seenA[m.agentGroup]=true;
+        var o=document.createElement('option');o.value=m.agentGroup;o.textContent=m.agentGroup;agentSel.appendChild(o);}
     });
-    metSel.addEventListener('change',function(){renderMetrics(metSel.value);});
+    function onFilter(){renderMetrics();}
+    if(metSel)metSel.addEventListener('change',onFilter);
+    if(caseSel)caseSel.addEventListener('change',onFilter);
+    if(agentSel)agentSel.addEventListener('change',onFilter);
   }
-  renderMetrics('');
+  renderMetrics();
 })();
 
-function renderMetrics(fn){
+function renderMetrics(){
   var mc=document.getElementById('mc');if(!mc)return;
+  var fn=document.getElementById('metricFilter');fn=fn?fn.value:'';
+  var fc=document.getElementById('metricCaseFilter');fc=fc?fc.value:'';
+  var fa=document.getElementById('metricAgentFilter');fa=fa?fa.value:'';
   // dispose old
   Object.keys(charts).forEach(function(id){if(id.indexOf('c_mx')===0){charts[id].dispose();delete charts[id];}});
   mc.innerHTML='';
-  var fs=fn?M.filter(function(m){return m.name===fn;}):M;
+  var fs=M.filter(function(m){
+    if(fn&&m.name!==fn)return false;
+    if(fc&&m.caseGroup!==fc)return false;
+    if(fa&&m.agentGroup!==fa)return false;
+    return true;
+  });
   if(!fs.length){mc.innerHTML='<div class="empty"><div class="icon">&#x1F4CA;</div><div>No metrics.</div></div>';return;}
-  var prevCase='\x00';
+  var prevGroup='\x00';
   fs.forEach(function(m,i){
-    if(m.caseGroup!==prevCase){
-      prevCase=m.caseGroup;
-      if(m.caseGroup){
+    var grpKey=(m.caseGroup||'')+'|'+(m.agentGroup||'');
+    if(grpKey!==prevGroup){
+      prevGroup=grpKey;
+      var parts=[];
+      if(m.caseGroup)parts.push('Case: '+m.caseGroup);
+      if(m.agentGroup)parts.push('Agent: '+m.agentGroup);
+      if(parts.length){
         var hdr=document.createElement('div');hdr.className='stit';
         hdr.style.cssText='font-size:13px;margin:16px 0 10px;border-left-color:#91cc75;color:#3ba272';
-        hdr.textContent='Case: '+m.caseGroup;mc.appendChild(hdr);
+        hdr.textContent=parts.join('  /  ');mc.appendChild(hdr);
       }
     }
     var id='c_mx'+i;

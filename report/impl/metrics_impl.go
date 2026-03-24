@@ -67,7 +67,8 @@ func (c *MemoryMetricsCollector) Unregister(name string) {
 func (c *MemoryMetricsCollector) Collect() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := time.Now()
+	// 截断到秒：同一秒内的多次采集只保留最后一个
+	now := time.Now().Truncate(time.Second)
 	for key, reg := range c.registrations {
 		value := reg.fn()
 		s := c.series[key]
@@ -75,7 +76,12 @@ func (c *MemoryMetricsCollector) Collect() {
 			s = &report.MetricsSeries{Name: reg.name, Labels: reg.labels}
 			c.series[key] = s
 		}
-		s.Points = append(s.Points, report.MetricsPoint{Timestamp: now, Value: value})
+		if n := len(s.Points); n > 0 && s.Points[n-1].Timestamp.Equal(now) {
+			// 同一秒内的再次采集覆盖旧值
+			s.Points[n-1].Value = value
+		} else {
+			s.Points = append(s.Points, report.MetricsPoint{Timestamp: now, Value: value})
+		}
 	}
 }
 

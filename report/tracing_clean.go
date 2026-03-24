@@ -9,7 +9,8 @@ import (
 // CleanTracingsToMetrics 将原始打点记录按 case 名称分组，逐秒聚合为标准 MetricsSeries。
 // 对每个 caseName 生成:
 //
-//	{name}_qps, {name}_avg_ms, {name}_p50_ms, {name}_p90_ms, {name}_p99_ms, {name}_success_rate
+//	{name}_qps, {name}_success_qps, {name}_failed_qps,
+//	{name}_avg_ms, {name}_p50_ms, {name}_p90_ms, {name}_p99_ms, {name}_success_rate
 func CleanTracingsToMetrics(records []*TracingRecord) []*MetricsSeries {
 	if len(records) == 0 {
 		return nil
@@ -60,6 +61,8 @@ func CleanTracingsToMetrics(records []*TracingRecord) []*MetricsSeries {
 
 		labels := map[string]string{"case": name}
 		qpsSeries := &MetricsSeries{Name: name + "_qps", Labels: labels}
+		successQPSSeries := &MetricsSeries{Name: name + "_success_qps", Labels: labels}
+		failedQPSSeries := &MetricsSeries{Name: name + "_failed_qps", Labels: labels}
 		avgSeries := &MetricsSeries{Name: name + "_avg_ms", Labels: labels}
 		p50Series := &MetricsSeries{Name: name + "_p50_ms", Labels: labels}
 		p90Series := &MetricsSeries{Name: name + "_p90_ms", Labels: labels}
@@ -75,6 +78,8 @@ func CleanTracingsToMetrics(records []*TracingRecord) []*MetricsSeries {
 			avg := float64(b.totalMs) / float64(total)
 
 			qpsSeries.Points = append(qpsSeries.Points, MetricsPoint{Timestamp: ts, Value: float64(total)})
+			successQPSSeries.Points = append(successQPSSeries.Points, MetricsPoint{Timestamp: ts, Value: float64(b.success)})
+			failedQPSSeries.Points = append(failedQPSSeries.Points, MetricsPoint{Timestamp: ts, Value: float64(b.failed)})
 			avgSeries.Points = append(avgSeries.Points, MetricsPoint{Timestamp: ts, Value: math.Round(avg*10) / 10})
 			p50Series.Points = append(p50Series.Points, MetricsPoint{Timestamp: ts, Value: float64(pct(b.durs, 50))})
 			p90Series.Points = append(p90Series.Points, MetricsPoint{Timestamp: ts, Value: float64(pct(b.durs, 90))})
@@ -87,7 +92,7 @@ func CleanTracingsToMetrics(records []*TracingRecord) []*MetricsSeries {
 			rateSeries.Points = append(rateSeries.Points, MetricsPoint{Timestamp: ts, Value: rate})
 		}
 
-		result = append(result, qpsSeries, avgSeries, p50Series, p90Series, p99Series, rateSeries)
+		result = append(result, qpsSeries, successQPSSeries, failedQPSSeries, avgSeries, p50Series, p90Series, p99Series, rateSeries)
 	}
 
 	return result
