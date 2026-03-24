@@ -65,7 +65,7 @@ func (m *Master) distributeSingleCase(ctx context.Context, reportID string, case
 	m.mu.RLock()
 	agents := make([]*agentInfo, 0, len(m.agents))
 	for _, a := range m.agents {
-		if a.Status != "online" {
+		if a.Status != "online" && a.Status != "busy" {
 			continue
 		}
 		if len(agentSet) > 0 {

@@ -64,6 +64,7 @@ tr:hover td{background:var(--hover)}
 .badge.error{background:#7f1d1d20;color:var(--danger);border:1px solid #7f1d1d40}
 .badge.pending{background:#78350f20;color:var(--warn);border:1px solid #78350f40}
 .badge.stopped{background:#78350f20;color:var(--warn);border:1px solid #78350f40}
+.badge.busy{background:#1e3a5f30;color:var(--accent);border:1px solid #1e3a5f60}
 
 /* Buttons */
 .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border:none;border-radius:6px;
@@ -439,7 +440,7 @@ async function loadOverview() {
     const taskList = tasks || [];
     taskList.forEach(t => { tasksData[t.report_id] = t; });
 
-    const onlineAgents = agentsData.filter(a => isOnline(a.last_seen) && a.status === 'online');
+    const onlineAgents = agentsData.filter(a => isOnline(a.last_seen) && (a.status === 'online' || a.status === 'busy'));
     document.getElementById('ov-agents').textContent = onlineAgents.length;
     const running = taskList.filter(t => t.status === 'running').length;
     const done = taskList.filter(t => t.status === 'done').length;
@@ -510,10 +511,10 @@ function renderAgentsTable() {
   });
   tbody.innerHTML = sorted.map(a => {
     const ago = timeSince(a.last_seen);
-    const online = a.status === 'online';
+    const online = a.status === 'online' || a.status === 'busy';
     return '<tr><td><strong>' + escapeHtml(a.id) + '</strong></td>' +
       '<td>' + escapeHtml(a.group_id || '-') + '</td>' +
-      '<td>' + statusBadge(online ? 'online' : 'offline') + '</td>' +
+      '<td>' + statusBadge(a.status === 'busy' ? 'busy' : (online ? 'online' : 'offline')) + '</td>' +
       '<td style="color:var(--muted);font-size:12px">' + ago + '</td></tr>';
   }).join('');
 }
@@ -580,7 +581,7 @@ function populateGroupOptions() {
 function populateAgentOptions() {
   renderOptions('agent', agentsData.map(a => ({
     id: a.id,
-    label: a.id + (a.group_id ? ' [' + a.group_id + ']' : '') + (a.status === 'online' ? '' : ' (offline)')
+    label: a.id + (a.group_id ? ' [' + a.group_id + ']' : '') + (a.status === 'online' || a.status === 'busy' ? '' : ' (offline)')
   })));
 }
 

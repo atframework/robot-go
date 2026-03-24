@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,12 +41,13 @@ type agentInfo struct {
 
 // taskStatus 一次分布式任务的状态
 type taskStatus struct {
-	ReportID       string   `json:"report_id"`
-	Status         string   `json:"status"` // pending / running / done / error
-	Error          string   `json:"error,omitempty"`
-	TargetGroup    string   `json:"target_group,omitempty"`
-	TargetAgents   []string `json:"target_agents,omitempty"`
-	DistributeMode string   `json:"distribute_mode,omitempty"`
+	ReportID       string    `json:"report_id"`
+	Status         string    `json:"status"` // pending / running / done / error
+	Error          string    `json:"error,omitempty"`
+	TargetGroup    string    `json:"target_group,omitempty"`
+	TargetAgents   []string  `json:"target_agents,omitempty"`
+	DistributeMode string    `json:"distribute_mode,omitempty"`
+	SubmittedAt    time.Time `json:"submitted_at"`
 }
 
 // Master 分布式压测调度端
@@ -200,11 +202,11 @@ func (m *Master) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		req.DistributeMode = "balance"
 	}
 
-	// 校验是否有可用 Agent
+	// 校验是否有可用 Agent（online 或 busy 均可接受任务）
 	m.mu.RLock()
 	agentCount := 0
 	for _, a := range m.agents {
-		if a.Status != "online" {
+		if a.Status != "online" && a.Status != "busy" {
 			continue
 		}
 		if len(req.TargetAgents) > 0 {
@@ -236,6 +238,7 @@ func (m *Master) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		TargetGroup:    req.TargetGroup,
 		TargetAgents:   req.TargetAgents,
 		DistributeMode: req.DistributeMode,
+		SubmittedAt:    time.Now(),
 	}
 	m.mu.Lock()
 	m.tasks[req.ReportID] = st
@@ -450,7 +453,7 @@ func (m *Master) startAgentCleanup() {
 		now := time.Now()
 		m.mu.Lock()
 		for id, a := range m.agents {
-			if a.Status == "offline" && now.Sub(a.LastSeen) > 5*time.Minute {
+			if (a.Status == "offline" || a.Status == "busy") && now.Sub(a.LastSeen) > 5*time.Minute {
 				log.Printf("[Master] Agent %s removed (offline for %.0fs)", id, now.Sub(a.LastSeen).Seconds())
 				delete(m.agents, id)
 				delete(m.agentQueues, id)
@@ -481,13 +484,18 @@ func (m *Master) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 	queue := m.getOrCreateAgentQueueLocked(agentID)
 	m.mu.Unlock()
 
-	// 连接断开时立即标记 offline，记录时间供清理 goroutine 使用
+	taskSent := false
+	// 连接断开时处理 Agent 状态：若已下发任务则标记 busy，否则标记 offline
 	defer func() {
 		m.mu.Lock()
-		if info, ok := m.agents[agentID]; ok && info.Status == "online" {
-			info.Status = "offline"
+		if info, ok := m.agents[agentID]; ok {
+			if taskSent {
+				info.Status = "busy"
+			} else if info.Status == "online" {
+				info.Status = "offline"
+				log.Printf("[Master] Agent %s offline (connection closed)", agentID)
+			}
 			info.LastSeen = time.Now()
-			log.Printf("[Master] Agent %s offline (connection closed)", agentID)
 		}
 		m.mu.Unlock()
 	}()
@@ -497,6 +505,7 @@ func (m *Master) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case task := <-queue:
+		taskSent = true
 		writeJSON(w, http.StatusOK, task)
 	case <-ctx.Done():
 		w.WriteHeader(http.StatusNoContent) // 204: 暂无任务，Agent 应立即重试
@@ -586,6 +595,9 @@ func (m *Master) handleListAllTasks(w http.ResponseWriter, _ *http.Request) {
 		list = append(list, t)
 	}
 	m.mu.RUnlock()
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].SubmittedAt.Before(list[j].SubmittedAt)
+	})
 	writeJSON(w, http.StatusOK, list)
 }
 
@@ -599,6 +611,14 @@ func (m *Master) handleTaskHistory(w http.ResponseWriter, _ *http.Request) {
 	for _, v := range result {
 		list = append(list, json.RawMessage(v))
 	}
+	sort.Slice(list, func(i, j int) bool {
+		var a, b struct {
+			SubmittedAt string `json:"submitted_at"`
+		}
+		json.Unmarshal(list[i], &a)
+		json.Unmarshal(list[j], &b)
+		return a.SubmittedAt < b.SubmittedAt
+	})
 	writeJSON(w, http.StatusOK, list)
 }
 
