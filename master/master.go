@@ -57,12 +57,13 @@ type Master struct {
 	reader *report_impl.RedisReportReader
 	gen    *report_impl.EChartsHTMLGenerator
 
-	agents      map[string]*agentInfo
-	tasks       map[string]*taskStatus
-	agentQueues map[string]chan *robot_case.AgentTask      // agentID -> 任务入队内存通道
-	taskResults map[string]chan robot_case.AgentTaskResult // taskKey -> 结果通道
-	taskCancels map[string]context.CancelFunc              // reportID -> 取消函数
-	mu          sync.RWMutex
+	agents         map[string]*agentInfo
+	tasks          map[string]*taskStatus
+	agentQueues    map[string]chan *robot_case.AgentTask      // agentID -> 任务入队内存通道
+	taskResults    map[string]chan robot_case.AgentTaskResult // taskKey -> 结果通道
+	taskCancels    map[string]context.CancelFunc              // reportID -> 取消函数
+	agentCancelChs map[string]chan string                     // agentID -> cancel 信号（reportID）
+	mu             sync.RWMutex
 
 	server *http.Server
 }
@@ -74,15 +75,16 @@ func NewMaster(cfg MasterConfig) (*Master, error) {
 		return nil, err
 	}
 	return &Master{
-		cfg:         cfg,
-		redis:       client,
-		reader:      report_impl.NewRedisReportReader(client),
-		gen:         report_impl.NewEChartsHTMLGenerator(),
-		agents:      make(map[string]*agentInfo),
-		tasks:       make(map[string]*taskStatus),
-		agentQueues: make(map[string]chan *robot_case.AgentTask),
-		taskResults: make(map[string]chan robot_case.AgentTaskResult),
-		taskCancels: make(map[string]context.CancelFunc),
+		cfg:            cfg,
+		redis:          client,
+		reader:         report_impl.NewRedisReportReader(client),
+		gen:            report_impl.NewEChartsHTMLGenerator(),
+		agents:         make(map[string]*agentInfo),
+		tasks:          make(map[string]*taskStatus),
+		agentQueues:    make(map[string]chan *robot_case.AgentTask),
+		taskResults:    make(map[string]chan robot_case.AgentTaskResult),
+		taskCancels:    make(map[string]context.CancelFunc),
+		agentCancelChs: make(map[string]chan string),
 	}, nil
 }
 
@@ -110,7 +112,7 @@ func (m *Master) Start() error {
 	// Agent 长轮询任务 + 结果上报
 	mux.HandleFunc("GET /api/agent/tasks/next", m.handleAgentPoll)
 	mux.HandleFunc("POST /api/agent/tasks/result", m.handleAgentResult)
-	mux.HandleFunc("GET /api/agent/tasks/cancel", m.handleAgentCancelCheck)
+	mux.HandleFunc("GET /api/agent/tasks/cancel_watch", m.handleAgentCancelWatch)
 
 	// Report viewer (serves generated HTML files)
 	mux.HandleFunc("GET /reports/{id}/view", m.handleViewReport)
@@ -507,6 +509,7 @@ func (m *Master) startAgentCleanup() {
 				log.Printf("[Master] Agent %s removed (offline for %.0fs)", id, now.Sub(a.LastSeen).Seconds())
 				delete(m.agents, id)
 				delete(m.agentQueues, id)
+				delete(m.agentCancelChs, id)
 				m.redis.HDel(context.Background(), "agent:registry", id)
 			}
 		}
@@ -594,7 +597,7 @@ func (m *Master) handleAgentResult(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// handleStopTask 取消正在运行的任务
+// handleStopTask 取消正在运行的任务，与 Reboot 相同流程：主动向 Agent 推送取消信号。
 func (m *Master) handleStopTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	m.mu.RLock()
@@ -610,6 +613,7 @@ func (m *Master) handleStopTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "task is not running", http.StatusBadRequest)
 		return
 	}
+	// 1. 停止 distributor goroutine（不再向 Agent 分发新 case）
 	if hasCancelFn {
 		cancelFn()
 	}
@@ -618,26 +622,87 @@ func (m *Master) handleStopTask(w http.ResponseWriter, r *http.Request) {
 	st.Error = "stopped by user"
 	m.mu.Unlock()
 
+	// 2. 主动向各目标 Agent 推送取消信号（与 Reboot 相同的推送流程）
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	go func() {
+		defer cancel()
+		m.sendCancelToAgents(ctx, id, st.TargetGroup, st.TargetAgents)
+	}()
+
 	log.Printf("[Master] Task %s stopped by user", id)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped", "report_id": id})
 }
 
-// handleAgentCancelCheck Agent 轮询检查当前任务是否已被取消。
-// Agent 执行期间定期 GET /api/agent/tasks/cancel?report_id=xxx，返回 {"cancelled":true/false}。
-func (m *Master) handleAgentCancelCheck(w http.ResponseWriter, r *http.Request) {
-	reportID := r.URL.Query().Get("report_id")
-	if reportID == "" {
-		http.Error(w, "report_id required", http.StatusBadRequest)
+// handleAgentCancelWatch Agent 长轮询接口：阻塞最多 30s 等待 Master 主动推送取消信号。
+// 与 handleAgentPoll 类似，但专用于取消通知，避免 Agent 轮询 cancel 状态的开销。
+func (m *Master) handleAgentCancelWatch(w http.ResponseWriter, r *http.Request) {
+	agentID := r.URL.Query().Get("agent_id")
+	if agentID == "" {
+		http.Error(w, "agent_id required", http.StatusBadRequest)
 		return
 	}
-	m.mu.RLock()
-	st, ok := m.tasks[reportID]
-	m.mu.RUnlock()
-	cancelled := false
-	if ok && (st.Status == "stopped" || st.Status == "error") {
-		cancelled = true
+
+	m.mu.Lock()
+	ch := m.getOrCreateAgentCancelChLocked(agentID)
+	m.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	select {
+	case reportID := <-ch:
+		writeJSON(w, http.StatusOK, map[string]string{"cancel_report_id": reportID})
+	case <-ctx.Done():
+		w.WriteHeader(http.StatusNoContent) // 204：无取消信号，Agent 应立即重试
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"cancelled": cancelled})
+}
+
+// sendCancelToAgents 向目标 Agent 推送取消信号（reportID），与 rebootAgents 推送逻辑对称。
+func (m *Master) sendCancelToAgents(ctx context.Context, reportID, targetGroup string, targetAgents []string) {
+	_ = ctx // 保留 ctx 参数，便于未来扩展（如发送超时控制）
+	agentSet := make(map[string]struct{}, len(targetAgents))
+	for _, id := range targetAgents {
+		agentSet[id] = struct{}{}
+	}
+
+	m.mu.RLock()
+	agents := make([]*agentInfo, 0, len(m.agents))
+	for _, a := range m.agents {
+		if len(agentSet) > 0 {
+			if _, ok := agentSet[a.ID]; ok {
+				agents = append(agents, a)
+			}
+		} else if targetGroup == "" || a.GroupID == targetGroup {
+			agents = append(agents, a)
+		}
+	}
+	m.mu.RUnlock()
+
+	if len(agents) == 0 {
+		return
+	}
+
+	m.mu.Lock()
+	for _, a := range agents {
+		ch := m.getOrCreateAgentCancelChLocked(a.ID)
+		select {
+		case ch <- reportID:
+		default:
+			log.Printf("[Master] Cancel channel full for agent %s, signal dropped", a.ID)
+		}
+	}
+	m.mu.Unlock()
+	log.Printf("[Master] Cancel signal for report %s sent to %d agent(s)", reportID, len(agents))
+}
+
+// getOrCreateAgentCancelChLocked 获取或创建 agent 的取消信号通道（调用时必须持有写锁）。
+func (m *Master) getOrCreateAgentCancelChLocked(agentID string) chan string {
+	if ch, ok := m.agentCancelChs[agentID]; ok {
+		return ch
+	}
+	ch := make(chan string, 8)
+	m.agentCancelChs[agentID] = ch
+	return ch
 }
 
 // ---------- Dashboard & Report Viewer ----------

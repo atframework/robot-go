@@ -36,8 +36,6 @@ type TracingEntry interface {
 type Tracer interface {
 	// NewEntry 创建一个新的打点实例（尚未开始计时）
 	NewEntry(name string, tags ...string) TracingEntry
-	// Snapshot 返回当前已完成的所有打点数据快照
-	Snapshot() []*TracingRecord
 	// Flush 返回快照并清空内部缓冲
 	Flush() []*TracingRecord
 	// Reset 清空所有数据

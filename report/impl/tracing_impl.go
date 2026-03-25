@@ -88,14 +88,6 @@ func (t *MemoryTracer) addRecord(r *report.TracingRecord) {
 	t.records = append(t.records, r)
 }
 
-func (t *MemoryTracer) Snapshot() []*report.TracingRecord {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	snapshot := make([]*report.TracingRecord, len(t.records))
-	copy(snapshot, t.records)
-	return snapshot
-}
-
 func (t *MemoryTracer) Flush() []*report.TracingRecord {
 	t.mu.Lock()
 	defer t.mu.Unlock()

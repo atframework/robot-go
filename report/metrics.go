@@ -34,8 +34,6 @@ type MetricsCollector interface {
 	// StopAutoCollect 停止自动采集
 	StopAutoCollect()
 
-	// Snapshot 返回所有时间序列数据快照
-	Snapshot() []*MetricsSeries
 	// Flush 返回快照并清空
 	Flush() []*MetricsSeries
 	// Reset 清空所有数据

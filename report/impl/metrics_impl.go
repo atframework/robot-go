@@ -118,22 +118,6 @@ func (c *MemoryMetricsCollector) StopAutoCollect() {
 	}
 }
 
-func (c *MemoryMetricsCollector) Snapshot() []*report.MetricsSeries {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	result := make([]*report.MetricsSeries, 0, len(c.series))
-	for _, s := range c.series {
-		cp := &report.MetricsSeries{
-			Name:   s.Name,
-			Labels: s.Labels,
-			Points: make([]report.MetricsPoint, len(s.Points)),
-		}
-		copy(cp.Points, s.Points)
-		result = append(result, cp)
-	}
-	return result
-}
-
 func (c *MemoryMetricsCollector) Flush() []*report.MetricsSeries {
 	c.mu.Lock()
 	defer c.mu.Unlock()

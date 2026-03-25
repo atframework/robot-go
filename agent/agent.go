@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	robot_case "github.com/atframework/robot-go/case"
@@ -63,7 +64,7 @@ func NewAgent(cfg AgentConfig) (*Agent, error) {
 	om.Register("online_users", func() float64 {
 		return float64(user_data.OnlineUserCount())
 	})
-	om.StartAutoCollect(time.Second)
+	// online_users 仅在任务执行期间采集（见 executeTask），空闲时不开启自动采集以避免数据无限堆积。
 
 	return &Agent{
 		cfg:           cfg,
@@ -150,18 +151,20 @@ func (a *Agent) executeTask(task *robot_case.AgentTask) {
 
 	// 丢弃 task 开始前积累的 online_users 历史数据（agent 启动到 task 开始之间的数据不属于本次报告）
 	_ = a.onlineMetrics.Flush()
-
-	// 立即采一次在线用户初始值（持续采集已在 Agent 初始化时启动）
-	a.onlineMetrics.Collect()
+	// 仅在任务执行期间采集 online_users，避免空闲时数据无限堆积
+	a.onlineMetrics.StartAutoCollect(time.Second)
 
 	// 创建 cancel context，用于取消机制
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 定期 flush 部分数据到 Redis 和检查 cancel
-	flushDone := make(chan struct{})
+	// 两个后台 goroutine 共用 WaitGroup 管理生命周期
+	var execWg sync.WaitGroup
+
+	// 定期 flush 部分数据到 Redis
+	execWg.Add(1)
 	go func() {
-		defer close(flushDone)
+		defer execWg.Done()
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -169,25 +172,43 @@ func (a *Agent) executeTask(task *robot_case.AgentTask) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// 检查任务是否被取消
-				if a.checkCancelled(task.ReportID) {
-					cancel()
-					return
-				}
 				// flush 部分打点数据
 				a.flushPartialData(task.ReportID, task.Params.CaseName, tracer, pressure)
 			}
 		}
 	}()
 
+	// Cancel watch goroutine：长轮询 Master 主动推送的取消信号（与 Reboot 相同的推送流程）
+	execWg.Add(1)
+	go func() {
+		defer execWg.Done()
+		if a.cfg.MasterAddr == "" {
+			// standalone 模式：无 Master，无取消信号来源，直接等待 ctx 结束
+			<-ctx.Done()
+			return
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if a.watchCancelSignal(ctx, task.ReportID) {
+				cancel()
+				return
+			}
+		}
+	}()
+
 	errMsg := robot_case.RunCaseStressWithContext(ctx, task.Params, tracer, pressure)
 
-	// 最终再采集一次在线用户（持续采集不停止，只 flush 增量数据）
-	a.onlineMetrics.Collect()
-
-	// 停止 flush goroutine
+	// 停止所有后台 goroutine 并等待退出
 	cancel()
-	<-flushDone
+	execWg.Wait()
+
+	// 停止 online_users 自动采集，并手动采一次最终快照
+	a.onlineMetrics.StopAutoCollect()
+	a.onlineMetrics.Collect()
 
 	// 最终 flush 剩余数据
 	tracings := tracer.Flush()
@@ -329,26 +350,37 @@ func (a *Agent) flushPartialData(reportID string, caseName string, tracer *repor
 	}
 }
 
-// checkCancelled 向 Master 查询任务是否已被取消。
-func (a *Agent) checkCancelled(reportID string) bool {
-	u, _ := url.Parse(a.masterURL("/api/agent/tasks/cancel"))
+// watchCancelSignal 向 Master 发起一次长轮询，阻塞到 Master 主动推送取消信号或超时。
+// 返回 true 表示当前 reportID 应被取消，返回 false 表示无信号（超时或错误）。
+func (a *Agent) watchCancelSignal(ctx context.Context, reportID string) bool {
+	u, _ := url.Parse(a.masterURL("/api/agent/tasks/cancel_watch"))
 	q := u.Query()
-	q.Set("report_id", reportID)
+	q.Set("agent_id", a.cfg.AgentID)
 	u.RawQuery = q.Encode()
 
-	resp, err := a.client.Get(u.String())
+	reqCtx, reqCancel := context.WithTimeout(ctx, 35*time.Second)
+	defer reqCancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return false // 网络错误不当作取消
+		return false
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return false // 网络错误或 ctx 已取消
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNoContent {
+		return false // 无取消信号
+	}
 	var result struct {
-		Cancelled bool `json:"cancelled"`
+		CancelReportID string `json:"cancel_report_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return false
 	}
-	return result.Cancelled
+	return result.CancelReportID == reportID
 }
 
 // postResult 向 Master 上报任务结果

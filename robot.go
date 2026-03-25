@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	log "github.com/atframework/atframe-utils-go/log"
 	agent "github.com/atframework/robot-go/agent"
@@ -18,9 +17,6 @@ import (
 	gatewayconn "github.com/atframework/robot-go/conn/atgateway"
 	user_interface "github.com/atframework/robot-go/data"
 	user_impl "github.com/atframework/robot-go/data/impl"
-	master "github.com/atframework/robot-go/master"
-	report "github.com/atframework/robot-go/report"
-	report_impl "github.com/atframework/robot-go/report/impl"
 	utils "github.com/atframework/robot-go/utils"
 	"gopkg.in/yaml.v3"
 )
@@ -35,6 +31,7 @@ func NewRobotFlagSet() *flag.FlagSet {
 	flagSet.String("case_file", "", "case file path")
 	flagSet.Int("case_file_repeated", 1, "case file repeated time")
 
+	// 链接层配置
 	flagSet.String("url", "ws://localhost:7001/ws/v1", "server url")
 	flagSet.String("connect-type", "websocket", "websocket, atgateway ...")
 	flagSet.String("access-token", "", "atgateway Mod: access token (enables gateway protocol)")
@@ -42,14 +39,11 @@ func NewRobotFlagSet() *flag.FlagSet {
 	flagSet.String("crypto", "none", "atgateway Mod: crypto algorithm list: none, xxtea, aes-128-cbc, aes-192-cbc, aes-256-cbc, aes-128-gcm, aes-192-gcm, aes-256-gcm, chacha20, chacha20-poly1305, xchacha20-poly1305")
 	flagSet.String("compression", "none", "atgateway Mod: compression algorithm list: none, zstd, lz4, snappy, zlib")
 
-	flagSet.String("report-dir", "./report", "report output directory (enables report generation)")
-
 	// 分布式模式
-	flagSet.String("mode", "", "run mode: (empty)=standalone, master, agent")
+	flagSet.String("mode", "", "run mode: (empty)=standalone, agent")
 	flagSet.String("redis-addr", "localhost:6379", "Redis address for distributed mode")
 	flagSet.String("redis-pwd", "", "Redis password")
 	flagSet.String("master-addr", "", "Master HTTP address (agent mode)")
-	flagSet.String("listen", ":8080", "HTTP listen address (master mode)")
 	flagSet.String("agent-id", "", "Agent ID (auto-generated if empty)")
 	flagSet.String("agent-group", "", "Agent group ID (for group-based task distribution)")
 	return flagSet
@@ -118,9 +112,6 @@ func StartRobot(flagSet *flag.FlagSet, unpack user_interface.UserReceiveUnpackFu
 	// --- 分布式模式分发 ---
 	mode := flagSet.Lookup("mode").Value.String()
 	switch mode {
-	case "master":
-		startMaster(flagSet)
-		return
 	case "agent":
 		startAgent(flagSet, unpack, createMsg)
 		return
@@ -155,12 +146,6 @@ func StartRobot(flagSet *flag.FlagSet, unpack user_interface.UserReceiveUnpackFu
 	base.Url = flagSet.Lookup("url").Value.String()
 	fmt.Println("URL:", base.Url)
 
-	// 报表系统初始化
-	reportDir := flagSet.Lookup("report-dir").Value.String()
-	if reportDir != "" {
-		initReportManager("", reportDir)
-	}
-
 	caseFile := flagSet.Lookup("case_file").Value.String()
 	if caseFile != "" {
 		repeatedTimeString := flagSet.Lookup("case_file_repeated").Value.String()
@@ -185,41 +170,8 @@ func StartRobot(flagSet *flag.FlagSet, unpack user_interface.UserReceiveUnpackFu
 
 	utils.StdoutLog("Closing all pending connections")
 	cmd.LogoutAllUsers()
-	report.FinalizeReport()
 	log.CloseAllLogWriters()
 	utils.StdoutLog("Exiting....")
-}
-
-func initReportManager(reportID string, reportDir string) {
-	now := time.Now()
-	if reportID == "" {
-		reportID = now.Format("20060102-150405")
-	}
-	tracer := report_impl.NewMemoryTracer()
-	metrics := report_impl.NewMemoryMetricsCollector()
-	pressure := report_impl.NewMemoryPressureController()
-	writer := report_impl.NewJSONFileWriter(reportDir)
-	generator := report_impl.NewEChartsHTMLGenerator()
-
-	mgr := &report.ReportManager{
-		Tracer:    tracer,
-		Metrics:   metrics,
-		Pressure:  pressure,
-		Writer:    writer,
-		Generator: generator,
-		ReportDir: reportDir,
-		ReportID:  reportID,
-		StartTime: now,
-	}
-	report.SetGlobalManager(mgr)
-
-	// 注册在线用户指标
-	metrics.Register("online_users", func() float64 {
-		return float64(user_interface.OnlineUserCount())
-	})
-	metrics.StartAutoCollect(time.Second)
-
-	fmt.Printf("Report enabled: dir=%s, id=%s\n", reportDir, reportID)
 }
 
 func getFlagString(fs *flag.FlagSet, name string) string {
@@ -228,34 +180,6 @@ func getFlagString(fs *flag.FlagSet, name string) string {
 		return ""
 	}
 	return f.Value.String()
-}
-
-func getFlagInt(fs *flag.FlagSet, name string) int {
-	f := fs.Lookup(name)
-	if f == nil {
-		return 0
-	}
-	v, _ := strconv.Atoi(f.Value.String())
-	return v
-}
-
-// startMaster 以 Master 模式启动
-func startMaster(flagSet *flag.FlagSet) {
-	cfg := master.MasterConfig{
-		ListenAddr: getFlagString(flagSet, "listen"),
-		RedisAddr:  getFlagString(flagSet, "redis-addr"),
-		RedisPwd:   getFlagString(flagSet, "redis-pwd"),
-		ReportDir:  getFlagString(flagSet, "report-dir"),
-	}
-	m, err := master.NewMaster(cfg)
-	if err != nil {
-		fmt.Println("Master init error:", err)
-		os.Exit(1)
-	}
-	if err := m.Start(); err != nil {
-		fmt.Println("Master error:", err)
-		os.Exit(1)
-	}
 }
 
 // startAgent 以 Agent 模式启动
