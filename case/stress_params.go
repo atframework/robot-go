@@ -36,6 +36,7 @@ type AgentTask struct {
 	ReportID  string       `json:"report_id"`
 	CaseIndex int          `json:"case_index"`
 	Params    StressParams `json:"params"`
+	EnableLog bool         `json:"enable_log"` // 是否开启日志输出，默认 false
 }
 
 // AgentTaskResult Agent 执行完成后通过 HTTP 上报给 Master 的结果。

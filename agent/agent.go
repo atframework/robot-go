@@ -200,7 +200,7 @@ func (a *Agent) executeTask(task *robot_case.AgentTask) {
 		}
 	}()
 
-	errMsg := robot_case.RunCaseStressWithContext(ctx, task.Params, tracer, pressure)
+	errMsg := robot_case.RunCaseStressWithContext(ctx, task.Params, tracer, pressure, task.EnableLog)
 
 	// 停止所有后台 goroutine 并等待退出
 	cancel()

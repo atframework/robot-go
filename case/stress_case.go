@@ -71,6 +71,7 @@ func RunCaseStressWithContext(
 	params StressParams,
 	tracer report.Tracer,
 	pressure report.PressureController,
+	enableLog bool,
 ) string {
 	caseName := params.CaseName
 	caseAction, ok := caseMapContainer[caseName]
@@ -119,19 +120,22 @@ func RunCaseStressWithContext(
 
 	InitProgressBar(totalCount)
 
-	bufferWriter, _ := log.NewLogBufferedRotatingWriter(nil,
-		fmt.Sprintf("../log/stress.%s.%s.%%N.log", caseName, beginTime.Format("15.04.05")), "", 50*1024*1024, 3, time.Second*3, 0)
-	logHandler := func(openId string, format string, a ...any) {
-		logString := fmt.Sprintf("[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05.000"), openId, fmt.Sprintf(format, a...))
-		bufferWriter.Write(lu.StringtoBytes(logString))
-	}
-	defer func() {
-		bufferWriter.Close()
-		bufferWriter.AwaitClose()
-	}()
+	var logHandler func(openId string, format string, a ...any) = nil
+	if enableLog {
+		bufferWriter, _ := log.NewLogBufferedRotatingWriter(nil,
+			fmt.Sprintf("../log/stress.%s.%s.%%N.log", caseName, beginTime.Format("15.04.05")), "", 50*1024*1024, 3, time.Second*3, 0)
+		logHandler = func(openId string, format string, a ...any) {
+			logString := fmt.Sprintf("[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05.000"), openId, fmt.Sprintf(format, a...))
+			bufferWriter.Write(lu.StringtoBytes(logString))
+		}
+		defer func() {
+			bufferWriter.Close()
+			bufferWriter.AwaitClose()
+		}()
 
-	logHandler("System", "StressCase[%s] Start, Users: %d, Batch: %d, QPS: %.1f, RunTime: %d, ErrorBreak: %v",
-		caseName, userCount, batchCount, params.TargetQPS, runTime, params.ErrorBreak)
+		logHandler("System", "StressCase[%s] Start, Users: %d, Batch: %d, QPS: %.1f, RunTime: %d, ErrorBreak: %v",
+			caseName, userCount, batchCount, params.TargetQPS, runTime, params.ErrorBreak)
+	}
 
 	caseActionChannel := make(chan *TaskActionCase, batchCount)
 	var stressFailedCount atomic.Int64
@@ -227,7 +231,9 @@ func RunCaseStressWithContext(
 	<-finishChannel
 
 	useTime := time.Since(beginTime).String()
-	logHandler("System", "StressCase[%s] Completed, Total Time: %s", caseName, useTime)
+	if enableLog {
+		logHandler("System", "StressCase[%s] Completed, Total Time: %s", caseName, useTime)
+	}
 
 	if ctx.Err() != nil {
 		return fmt.Sprintf("StressCase[%s] Cancelled, Total Time: %s", caseName, useTime)

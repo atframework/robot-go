@@ -51,7 +51,9 @@ func (t *TaskActionCase) HookRun() error {
 }
 
 func (t *TaskActionCase) Log(format string, a ...any) {
-	t.logHandler(t.OpenId, format, a...)
+	if t.logHandler != nil {
+		t.logHandler(t.OpenId, format, a...)
+	}
 }
 
 func init() {

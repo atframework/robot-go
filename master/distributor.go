@@ -110,6 +110,7 @@ func (m *Master) distributeSingleCase(ctx context.Context, reportID string, case
 				ReportID:  reportID,
 				CaseIndex: caseIndex,
 				Params:    params,
+				EnableLog: false,
 			}
 			wg.Add(1)
 			go func(a *agentInfo, t *robot_case.AgentTask) {
@@ -155,6 +156,7 @@ func (m *Master) distributeSingleCase(ctx context.Context, reportID string, case
 				ReportID:  reportID,
 				CaseIndex: caseIndex,
 				Params:    split,
+				EnableLog: false,
 			}
 
 			wg.Add(1)
@@ -215,8 +217,9 @@ func (m *Master) rebootAgents(ctx context.Context, targetGroup string, targetAge
 	for _, agent := range agents {
 		taskKey := fmt.Sprintf("reboot/%s/%s", stamp, agent.ID)
 		task := &robot_case.AgentTask{
-			TaskType: "reboot",
-			TaskKey:  taskKey,
+			TaskType:  "reboot",
+			TaskKey:   taskKey,
+			EnableLog: false,
 		}
 		wg.Add(1)
 		go func(a *agentInfo, t *robot_case.AgentTask) {
