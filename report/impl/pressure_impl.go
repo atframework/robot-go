@@ -3,7 +3,7 @@ package impl
 import (
 	"math"
 	"runtime"
-	"sync"
+	"runtime/metrics"
 	"sync/atomic"
 	"time"
 
@@ -39,7 +39,6 @@ func DefaultPressureThresholds() PressureThresholds {
 
 // MemoryPressureController 是 PressureController 的内存实现
 type MemoryPressureController struct {
-	mu            sync.Mutex
 	targetQPS     float64
 	throttleRatio float64 // 1.0 = 不限速
 	level         report.PressureLevel
@@ -62,14 +61,10 @@ func NewMemoryPressureController(thresholds ...PressureThresholds) *MemoryPressu
 }
 
 func (p *MemoryPressureController) SetTargetQPS(qps float64) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.targetQPS = qps
 }
 
 func (p *MemoryPressureController) EffectiveQPS() float64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	return p.targetQPS * p.throttleRatio
 }
 
@@ -82,14 +77,11 @@ func (p *MemoryPressureController) DonePending() {
 }
 
 func (p *MemoryPressureController) Start(interval time.Duration) {
-	p.mu.Lock()
 	if p.running {
-		p.mu.Unlock()
 		return
 	}
 	p.stopCh = make(chan struct{})
 	p.running = true
-	p.mu.Unlock()
 
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -106,8 +98,6 @@ func (p *MemoryPressureController) Start(interval time.Duration) {
 }
 
 func (p *MemoryPressureController) Stop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.running {
 		close(p.stopCh)
 		p.running = false
@@ -115,14 +105,10 @@ func (p *MemoryPressureController) Stop() {
 }
 
 func (p *MemoryPressureController) CurrentLevel() report.PressureLevel {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	return p.level
 }
 
 func (p *MemoryPressureController) Snapshots() []report.PressureSnapshot {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	cp := make([]report.PressureSnapshot, len(p.snapshots))
 	copy(cp, p.snapshots)
 	return cp
@@ -130,25 +116,27 @@ func (p *MemoryPressureController) Snapshots() []report.PressureSnapshot {
 
 // FlushSnapshots 返回自上次 Flush 以来新增的快照并清空内部缓冲，避免重复写入。
 func (p *MemoryPressureController) FlushSnapshots() []report.PressureSnapshot {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	snaps := p.snapshots
 	p.snapshots = nil
 	return snaps
 }
 
 func (p *MemoryPressureController) detect() {
-	var memStats runtime.MemStats
-	runtime.ReadMemStats(&memStats)
+	// 使用 runtime/metrics 代替 runtime.ReadMemStats，避免 STW 停顿
+	samples := []metrics.Sample{
+		{Name: "/memory/classes/heap/objects:bytes"},
+	}
+	metrics.Read(samples)
+	var heapBytes uint64
+	if samples[0].Value.Kind() == metrics.KindUint64 {
+		heapBytes = samples[0].Value.Uint64()
+	}
 
 	goroutines := runtime.NumGoroutine()
-	heapMB := float64(memStats.HeapAlloc) / (1024 * 1024)
+	heapMB := float64(heapBytes) / (1024 * 1024)
 	pendingReqs := p.pending.Load()
 
 	newLevel := p.calcLevel(goroutines, heapMB, pendingReqs)
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	oldLevel := p.level
 
@@ -200,9 +188,7 @@ func (p *MemoryPressureController) calcLevel(goroutines int, heapMB float64, pen
 		level = max(level, report.PressureLevelWarning)
 	}
 
-	p.mu.Lock()
 	targetConcurrency := p.targetQPS
-	p.mu.Unlock()
 	if targetConcurrency > 0 {
 		pendingF := float64(pending)
 		if pendingF > targetConcurrency*t.PendingMultCrit {

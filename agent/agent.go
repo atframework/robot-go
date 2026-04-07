@@ -27,12 +27,13 @@ var ErrAgentIDConflict = errors.New("agent ID conflict: another instance with th
 
 // AgentConfig Agent 启动配置
 type AgentConfig struct {
-	MasterAddr string // Master HTTP 地址
-	RedisAddr  string
-	RedisPwd   string
-	AgentID    string // 唯一标识（默认 hostname+pid）
-	GroupID    string // 组 ID（可选，Master 按组分发任务）
-	SessionID  string // 进程级会话 ID，由 NewAgent 自动生成；用于 Master 检测 ID 冲突
+	MasterAddr    string // Master HTTP 地址
+	RedisAddr     string
+	RedisPwd      string
+	AgentID       string        // 唯一标识（默认 hostname+pid）
+	GroupID       string        // 组 ID（可选，Master 按组分发任务）
+	SessionID     string        // 进程级会话 ID，由 NewAgent 自动生成；用于 Master 检测 ID 冲突
+	FlushInterval time.Duration // 定期 flush 数据到 Redis 的间隔（默认 5s）
 }
 
 // Agent 分布式压测执行端（主动向 Master 拉取任务）
@@ -165,7 +166,11 @@ func (a *Agent) executeTask(task *robot_case.AgentTask) {
 	execWg.Add(1)
 	go func() {
 		defer execWg.Done()
-		ticker := time.NewTicker(5 * time.Second)
+		flushInterval := a.cfg.FlushInterval
+		if flushInterval <= 0 {
+			flushInterval = 5 * time.Second
+		}
+		ticker := time.NewTicker(flushInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -200,7 +205,7 @@ func (a *Agent) executeTask(task *robot_case.AgentTask) {
 		}
 	}()
 
-	errMsg := robot_case.RunCaseStressWithContext(ctx, task.Params, tracer, pressure, task.EnableLog)
+	errMsg := robot_case.RunCaseInner(ctx, task.Params, tracer, pressure, task.EnableLog, false)
 
 	// 停止所有后台 goroutine 并等待退出
 	cancel()

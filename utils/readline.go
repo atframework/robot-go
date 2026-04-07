@@ -28,6 +28,10 @@ func (t *TaskActionCmd) Log(format string, a ...any) {
 	StdoutLog(fmt.Sprintf(format, a...))
 }
 
+func init() {
+	var _ base.TaskActionImpl = &TaskActionCmd{}
+}
+
 type CommandFunc func(base.TaskActionImpl, []string) string
 
 type CommandNode struct {

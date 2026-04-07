@@ -12,7 +12,7 @@ import (
 	agent "github.com/atframework/robot-go/agent"
 	base "github.com/atframework/robot-go/base"
 	robot_case "github.com/atframework/robot-go/case"
-	cmd "github.com/atframework/robot-go/cmd"
+	_ "github.com/atframework/robot-go/cmd"
 	conn "github.com/atframework/robot-go/conn"
 	gatewayconn "github.com/atframework/robot-go/conn/atgateway"
 	user_interface "github.com/atframework/robot-go/data"
@@ -109,19 +109,11 @@ func StartRobot(flagSet *flag.FlagSet, unpack user_interface.UserReceiveUnpackFu
 		return
 	}
 
-	// --- 分布式模式分发 ---
-	mode := flagSet.Lookup("mode").Value.String()
-	switch mode {
-	case "agent":
-		startAgent(flagSet, unpack, createMsg)
-		return
-	}
-
-	// --- Standalone 模式 ---
 	if unpack == nil || createMsg == nil {
 		fmt.Println("unpack or createMsg function is nil")
 		return
 	}
+	user_interface.RegisterCreateUser(user_impl.CreateUser, unpack, createMsg)
 
 	var connectType string
 	if flagSet.Lookup("connect-type").Value.String() != "" {
@@ -129,23 +121,25 @@ func StartRobot(flagSet *flag.FlagSet, unpack user_interface.UserReceiveUnpackFu
 	}
 
 	switch connectType {
-	case "websocket":
-		fmt.Println("Using plain WebSocket connection")
 	case "atgateway":
-		fmt.Println("Using atgateway protocol connection")
 		cfg := gatewayconn.ParseGatewayConfig(flagSet)
 		base.ConnectFunc = func() (conn.Connection, error) {
 			return gatewayconn.DialGateway(base.Url, cfg)
 		}
-	default:
-		fmt.Println("Not Override ConnectFunc, Connect Type:", connectType)
 	}
-
-	user_interface.RegisterCreateUser(user_impl.CreateUser, unpack, createMsg)
 
 	base.Url = flagSet.Lookup("url").Value.String()
 	fmt.Println("URL:", base.Url)
 
+	mode := flagSet.Lookup("mode").Value.String()
+	switch mode {
+	case "agent":
+		fmt.Println("Starting in Agent mode")
+		startAgent(flagSet, unpack, createMsg)
+		return
+	}
+
+	// --- Standalone 模式 ---
 	caseFile := flagSet.Lookup("case_file").Value.String()
 	if caseFile != "" {
 		repeatedTimeString := flagSet.Lookup("case_file_repeated").Value.String()
@@ -169,7 +163,7 @@ func StartRobot(flagSet *flag.FlagSet, unpack user_interface.UserReceiveUnpackFu
 	}
 
 	utils.StdoutLog("Closing all pending connections")
-	cmd.LogoutAllUsers()
+	user_interface.LogoutAllUsers()
 	log.CloseAllLogWriters()
 	utils.StdoutLog("Exiting....")
 }
@@ -184,24 +178,6 @@ func getFlagString(fs *flag.FlagSet, name string) string {
 
 // startAgent 以 Agent 模式启动
 func startAgent(flagSet *flag.FlagSet, unpack user_interface.UserReceiveUnpackFunc, createMsg user_interface.UserReceiveCreateMessageFunc) {
-	// Agent 也需要注册 case 函数和连接方式
-	if unpack != nil && createMsg != nil {
-		user_interface.RegisterCreateUser(user_impl.CreateUser, unpack, createMsg)
-	}
-
-	var connectType string
-	if flagSet.Lookup("connect-type").Value.String() != "" {
-		connectType = flagSet.Lookup("connect-type").Value.String()
-	}
-	switch connectType {
-	case "atgateway":
-		cfg := gatewayconn.ParseGatewayConfig(flagSet)
-		base.ConnectFunc = func() (conn.Connection, error) {
-			return gatewayconn.DialGateway(base.Url, cfg)
-		}
-	}
-	base.Url = getFlagString(flagSet, "url")
-
 	cfg := agent.AgentConfig{
 		MasterAddr: getFlagString(flagSet, "master-addr"),
 		RedisAddr:  getFlagString(flagSet, "redis-addr"),

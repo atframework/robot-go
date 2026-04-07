@@ -10,7 +10,6 @@ import (
 	pu "github.com/atframework/atframe-utils-go/proto_utility"
 	base "github.com/atframework/robot-go/base"
 	conn "github.com/atframework/robot-go/conn"
-	utils "github.com/atframework/robot-go/utils"
 	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -35,7 +34,8 @@ type User struct {
 
 	connectionSequence uint64
 	connection         conn.Connection
-	rpcAwaitTask       sync.Map
+	rpcAwaitTask       *user_data.RPCRingBuffer
+	sendBuf            []byte // 复用的 proto.Marshal 缓冲区，避免每次分配
 
 	csLog *log.LogBufferedRotatingWriter
 
@@ -68,6 +68,7 @@ func NewUser(openId string, c conn.Connection, bufferWriter *log.LogBufferedRota
 		AccessToken:             fmt.Sprintf("access-token-for-%s", openId),
 		connectionSequence:      99,
 		connection:              c,
+		rpcAwaitTask:            user_data.NewRPCRingBuffer(256),
 		csLog:                   bufferWriter,
 		taskManager:             base.NewTaskActionManager(),
 		messageHandler:          make(map[string]func(*user_data.TaskActionUser, proto.Message, int32) error),
@@ -86,23 +87,18 @@ func CreateUser(openId string, logHandler func(format string, a ...any),
 		bufferWriter, _ = log.NewLogBufferedRotatingWriter(nil,
 			fmt.Sprintf("../log/actor/%s.%%N.log", openId), "", 20*1024*1024, 3, time.Second*3, 0)
 	}
-	if logHandler == nil {
-		logBufferWriter, _ := log.NewLogBufferedRotatingWriter(nil,
-			fmt.Sprintf("../log/user/%s.%%N.log", openId), "", 5*1024*1024, 1, time.Second*3, 0)
-		logHandler = func(format string, a ...any) {
-			fmt.Fprintf(logBufferWriter, "%s %s", time.Now().Format("2006-01-02 15:04:05.000"), fmt.Sprintf(format, a...))
-		}
-	}
 	c, err := connectFn()
 	if err != nil {
-		logHandler("Error connecting to server: %v", err)
+		if logHandler != nil {
+			logHandler("Error connecting to server: %v", err)
+		}
 		return nil
 	}
 
 	ret := NewUser(openId, c, bufferWriter, logHandler)
 	go ret.ReceiveHandler(unpack, createMsg)
 
-	ret.Log("Create User: %s", openId)
+	ret.Log("Create User")
 	return ret
 }
 
@@ -126,12 +122,26 @@ func (u *User) IsLogin() bool {
 	return true
 }
 
-func (u *User) Logout() {
-	if !u.IsLogin() {
+func (user *User) Logout() {
+	if !user.IsLogin() {
 		return
 	}
-	u.Logined = false
-	u.Close()
+	user.Log("user logout")
+	user.Logined = false
+	user_data.OnUserLogout()
+	user.Close()
+}
+
+func (user *User) Login() {
+	if user == nil {
+		return
+	}
+	if user.IsLogin() {
+		return
+	}
+	user.Log("user Login")
+	user.Logined = true
+	user_data.OnUserLogin()
 }
 
 func (u *User) TakeActionGuard() {
@@ -174,12 +184,12 @@ type rpcResumeData struct {
 
 func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createMsg user_data.UserReceiveCreateMessageFunc) {
 	defer func() {
-		user.Log("User %v:%v connection closed.", user.ZoneId, user.UserId)
+		user.Log("connection closed.")
 		user.RunTaskDefaultTimeout(func(action *user_data.TaskActionUser) error {
 			user.connection = nil
 			user.Close()
 			user.receiveHandlerCloseChan <- struct{}{}
-			action.InitOnFinish(func(error) {
+			action.InitOnFinish(func(base.TaskActionImpl, error) {
 				user.taskManager.CloseAll()
 			})
 			return nil
@@ -233,10 +243,14 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 		// 	continue
 		// }
 
-		user.Log("User: %d Code: %d <<<<<<<<<<<<<<<< Received: %s <<<<<<<<<<<<<<<<<<<", user.GetUserId(), errorCode, rpcName)
+		if user.logHandler != nil {
+			user.Log("User: %d Code: %d <<<<<<<<<<<<<<<< Received: %s <<<<<<<<<<<<<<<<<<<", user.GetUserId(), errorCode, rpcName)
+		}
 		messageType, err := protoregistry.GlobalTypes.FindMessageByName(protoreflect.FullName(typeName))
 		if err != nil {
-			user.Log("Unsupport in TypeName: %s ", typeName)
+			if user.logHandler != nil {
+				user.Log("Unsupport in TypeName: %s ", typeName)
+			}
 			if user.csLog != nil {
 				fmt.Fprintf(user.csLog, "%s %s\nHead:%s", time.Now().Format("2006-01-02 15:04:05.000"),
 					fmt.Sprintf("<<<<<<<<<<<<<<<<<<<< Unsupport Received: %s <<<<<<<<<<<<<<<<<<<", rpcName), pu.MessageReadableTextIndent(csMsgHead))
@@ -247,7 +261,9 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 
 		err = proto.Unmarshal(bodyBin, csBody)
 		if err != nil {
-			user.Log("Error in Unmarshal: %v", err)
+			if user.logHandler != nil {
+				user.Log("Error in Unmarshal: %v", err)
+			}
 			if user.csLog != nil {
 				fmt.Fprintf(user.csLog, "%s %s\nHead:%s", time.Now().Format("2006-01-02 15:04:05.000"),
 					fmt.Sprintf("<<<<<<<<<<<<<<<<<<<< Unmarshal Error Received: %s <<<<<<<<<<<<<<<<<<<", rpcName), pu.MessageReadableTextIndent(csMsgHead))
@@ -259,11 +275,10 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 			fmt.Fprintf(user.csLog, "%s %s\nHead:%s\nBody:%s", time.Now().Format("2006-01-02 15:04:05.000"),
 				fmt.Sprintf("<<<<<<<<<<<<<<<<<<<< Received: %s <<<<<<<<<<<<<<<<<<<", rpcName), pu.MessageReadableTextIndent(csMsgHead), pu.MessageReadableTextIndent(csBody))
 		}
-		task, ok := user.rpcAwaitTask.Load(sequence)
+		task, ok := user.rpcAwaitTask.LoadAndDelete(sequence)
 		if ok {
 			// RPC response
-			user.rpcAwaitTask.Delete(sequence)
-			task.(*user_data.TaskActionUser).Resume(&base.TaskActionAwaitData{
+			task.Resume(&base.TaskActionAwaitData{
 				WaitingType: base.TaskActionAwaitTypeRPC,
 				WaitingId:   sequence,
 			}, &base.TaskActionResumeData{
@@ -286,7 +301,9 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 }
 
 func (user *User) AwaitReceiveHandlerClose() {
+	user.ReleaseActionGuard()
 	<-user.receiveHandlerCloseChan
+	user.TakeActionGuard()
 }
 
 func (user *User) InitHeartbeatFunc(f func(user_data.User) error) {
@@ -311,7 +328,7 @@ type RpcTimeout struct {
 	seq      uint64
 }
 
-func (user *User) SendReq(action *user_data.TaskActionUser, csMsg proto.Message,
+func (user *User) SendReq(action base.TaskActionImpl, csMsg proto.Message,
 	csHead proto.Message, csBody proto.Message, rpcName string, sequence uint64, needRsp bool) (int32, proto.Message, error) {
 	if user == nil {
 		return 0, nil, fmt.Errorf("no login")
@@ -325,13 +342,20 @@ func (user *User) SendReq(action *user_data.TaskActionUser, csMsg proto.Message,
 		return 0, nil, fmt.Errorf("connection lost")
 	}
 
-	var csBin []byte
-	csBin, _ = proto.Marshal(csMsg)
-	titleString := fmt.Sprintf("User: %d >>>>>>>>>>>>>>>>>>>> Sending: %s >>>>>>>>>>>>>>>>>>>>", user.GetUserId(), rpcName)
-	user.Log("%s", titleString)
-	if user.csLog != nil {
-		fmt.Fprintf(user.csLog, "%s %s\nHead:%s\nBody:%s", time.Now().Format("2006-01-02 15:04:05.000"),
-			titleString, pu.MessageReadableTextIndent(csHead), pu.MessageReadableTextIndent(csBody))
+	// 复用 sendBuf 避免每次 Marshal 分配新 []byte
+	var err2 error
+	user.sendBuf, err2 = proto.MarshalOptions{}.MarshalAppend(user.sendBuf[:0], csMsg)
+	if err2 != nil {
+		return 0, nil, fmt.Errorf("marshal error: %w", err2)
+	}
+	csBin := user.sendBuf
+	if user.logHandler != nil {
+		titleString := fmt.Sprintf("User: %d >>>>>>>>>>>>>>>>>>>> Sending: %s >>>>>>>>>>>>>>>>>>>>", user.GetUserId(), rpcName)
+		user.Log("%s", titleString)
+		if user.csLog != nil {
+			fmt.Fprintf(user.csLog, "%s %s\nHead:%s\nBody:%s", time.Now().Format("2006-01-02 15:04:05.000"),
+				titleString, pu.MessageReadableTextIndent(csHead), pu.MessageReadableTextIndent(csBody))
+		}
 	}
 
 	if needRsp {
@@ -339,16 +363,17 @@ func (user *User) SendReq(action *user_data.TaskActionUser, csMsg proto.Message,
 			WaitingType: base.TaskActionAwaitTypeRPC,
 			WaitingId:   sequence,
 		}
-		action.AwaitData = awaitData
-		user.rpcAwaitTask.Store(sequence, action)
+		action.SetAwaitData(awaitData)
+		user.rpcAwaitTask.StoreBlocking(sequence, action)
 	}
 
 	err := user.connection.WriteMessage(csBin)
 	if err != nil {
 		user.Log("Error during writing to websocket: %v", err)
 		if needRsp {
-			if action.AwaitData.WaitingId == sequence && action.AwaitData.WaitingType == base.TaskActionAwaitTypeRPC {
-				action.AwaitData = base.TaskActionAwaitData{}
+			awaitData := action.GetAwaitData()
+			if awaitData.WaitingId == sequence && awaitData.WaitingType == base.TaskActionAwaitTypeRPC {
+				action.ClearAwaitData()
 			}
 			user.rpcAwaitTask.Delete(sequence)
 		}
@@ -356,10 +381,7 @@ func (user *User) SendReq(action *user_data.TaskActionUser, csMsg proto.Message,
 	}
 
 	if needRsp {
-		resumeData := action.Yield(base.TaskActionAwaitData{
-			WaitingType: base.TaskActionAwaitTypeRPC,
-			WaitingId:   sequence,
-		})
+		resumeData := action.Yield()
 		if resumeData.Err != nil {
 			return 0, nil, resumeData.Err
 		}
@@ -390,17 +412,9 @@ func (user *User) RegisterMessageHandler(rpcName string, f func(*user_data.TaskA
 
 func (user *User) Log(format string, a ...any) {
 	if user == nil || user.logHandler == nil {
-		utils.StdoutLog(fmt.Sprintf(format, a...))
 		return
 	}
 	user.logHandler(format, a...)
-}
-
-func (user *User) GetLoginCode() string {
-	if user == nil {
-		return ""
-	}
-	return user.LoginCode
 }
 
 func (user *User) GetLogined() bool {
@@ -438,13 +452,6 @@ func (user *User) GetZoneId() uint32 {
 	return user.ZoneId
 }
 
-func (user *User) SetLoginCode(d string) {
-	if user == nil {
-		return
-	}
-	user.LoginCode = d
-}
-
 func (user *User) SetUserId(d uint64) {
 	if user == nil {
 		return
@@ -457,13 +464,6 @@ func (user *User) SetZoneId(d uint32) {
 		return
 	}
 	user.ZoneId = d
-}
-
-func (user *User) SetLogined(d bool) {
-	if user == nil {
-		return
-	}
-	user.Logined = d
 }
 
 func (user *User) SetHeartbeatInterval(d time.Duration) {

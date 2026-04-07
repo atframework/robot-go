@@ -1,9 +1,13 @@
 package atsf4g_go_robot_user
 
 import (
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	lu "github.com/atframework/atframe-utils-go/lang_utility"
+	log "github.com/atframework/atframe-utils-go/log"
 	base "github.com/atframework/robot-go/base"
 	conn "github.com/atframework/robot-go/conn"
 	"google.golang.org/protobuf/proto"
@@ -21,10 +25,12 @@ type UserReceiveCreateMessageFunc func() proto.Message
 
 type User interface {
 	IsLogin() bool
+	Login()
 	Logout()
+
 	AllocSequence() uint64
 	ReceiveHandler(unpack UserReceiveUnpackFunc, createMsg UserReceiveCreateMessageFunc)
-	SendReq(action *TaskActionUser, csMsg proto.Message, csHead proto.Message,
+	SendReq(action base.TaskActionImpl, csMsg proto.Message, csHead proto.Message,
 		csBody proto.Message, rpcName string, sequence uint64, needRsp bool) (int32, proto.Message, error)
 	TakeActionGuard()
 	ReleaseActionGuard()
@@ -35,17 +41,14 @@ type User interface {
 	AwaitReceiveHandlerClose()
 	InitHeartbeatFunc(func(User) error)
 
-	GetLoginCode() string
 	GetLogined() bool
 	GetOpenId() string
 	GetAccessToken() string
 	GetUserId() uint64
 	GetZoneId() uint32
 
-	SetLoginCode(string)
 	SetUserId(uint64)
 	SetZoneId(uint32)
-	SetLogined(bool)
 	SetHeartbeatInterval(time.Duration)
 	SetLastPingTime(time.Time)
 	SetHasGetInfo(bool)
@@ -75,61 +78,78 @@ func CreateUser(openId string, logHandler func(format string, a ...any), enableA
 	return createUserFn(openId, logHandler, enableActorLog, base.ConnectFunc)
 }
 
-var userMapContainerLock sync.RWMutex
-var userMapContainer = make(map[string]User)
+var loginUserCount atomic.Int64
 
-func UserContainerAddUser(u User) {
-	userMapContainerLock.Lock()
-	defer userMapContainerLock.Unlock()
+// OnlineUserCount 返回当前在线用户数
+func OnlineUserCount() int {
+	return int(loginUserCount.Load())
+}
 
-	userMapContainer[u.GetOpenId()] = u
-	u.AddOnClosedHandler(func(user User) {
-		UserContainerDelUser(user.GetOpenId(), user)
+func CreateDefaultUserLogHandler(openId string) func(format string, a ...any) {
+	logBufferWriter, _ := log.NewLogBufferedRotatingWriter(nil,
+		fmt.Sprintf("../log/user/%s.%%N.log", openId), "", 5*1024*1024, 1, time.Second*3, 0)
+	return func(format string, a ...any) {
+		fmt.Fprintf(logBufferWriter, "%s %s", time.Now().Format("2006-01-02 15:04:05.000"), fmt.Sprintf(format, a...))
+	}
+}
+
+type UserHolder struct {
+	User
+	OpenId      string
+	PrivateData any
+}
+
+func (h *UserHolder) IsUserVaildLogin() bool {
+	return h != nil && h.User != nil && h.User.IsLogin()
+}
+
+var userMapContainer = sync.Map{}
+
+func OnUserLogin() {
+	loginUserCount.Add(1)
+}
+
+func OnUserLogout() {
+	loginUserCount.Add(-1)
+}
+
+func UserContainerGetUser(openId string) *UserHolder {
+	v, _ := userMapContainer.LoadOrStore(openId, &UserHolder{
+		OpenId: openId,
 	})
+	return v.(*UserHolder)
 }
 
-func UserContainerDelUser(openId string, checkUser User) {
-	userMapContainerLock.Lock()
-	defer userMapContainerLock.Unlock()
-
-	v, ok := userMapContainer[openId]
-	if !ok {
-		return
-	}
-	if v == checkUser {
-		delete(userMapContainer, openId)
-	}
-}
-
-func UserContainerGetUser(openId string) User {
-	userMapContainerLock.RLock()
-	defer userMapContainerLock.RUnlock()
-
-	v, ok := userMapContainer[openId]
-	if !ok {
+func UserContainerTryGetUser(openId string) *UserHolder {
+	v, _ := userMapContainer.Load(openId)
+	if v == nil {
 		return nil
 	}
-	return v
+	return v.(*UserHolder)
 }
 
-// OnlineUserCount 返回当前在线用户数（注册到 MetricsCollector 用）
-func OnlineUserCount() int {
-	userMapContainerLock.RLock()
-	defer userMapContainerLock.RUnlock()
-	return len(userMapContainer)
+func UserContainerDelUser(holder *UserHolder) {
+	userMapContainer.CompareAndDelete(holder.GetOpenId(), holder)
 }
 
-// LogoutAllUsers 登出并清理所有在线用户（Agent Reboot 时调用）
+// LogoutAllUsers 登出并清理所有在线用户
 func LogoutAllUsers() {
-	userMapContainerLock.Lock()
-	users := make([]User, 0, len(userMapContainer))
-	for _, u := range userMapContainer {
-		users = append(users, u)
-	}
-	userMapContainer = make(map[string]User) // 清空容器
-	userMapContainerLock.Unlock()
+	userMapContainer.Range(func(_, value any) bool {
+		value.(*UserHolder).Logout()
+		return true
+	})
+	userMapContainer.Clear()
+}
 
-	for _, u := range users {
-		u.Logout()
-	}
+func GetAllUsers() []User {
+	var users []User
+	userMapContainer.Range(func(_, value any) bool {
+		holder := value.(*UserHolder)
+		if lu.IsNil(holder.User) {
+			return true
+		}
+		users = append(users, holder.User)
+		return true
+	})
+	return users
 }

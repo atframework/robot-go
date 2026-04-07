@@ -7,11 +7,12 @@ import (
 	"time"
 
 	lu "github.com/atframework/atframe-utils-go/lang_utility"
+	"github.com/panjf2000/ants/v2"
 )
 
 type TaskActionImpl interface {
 	AwaitTask(TaskActionImpl) error
-	InitOnFinish(func(error))
+	InitOnFinish(func(TaskActionImpl, error))
 	GetTaskId() uint64
 	BeforeYield()
 	AfterYield()
@@ -21,13 +22,21 @@ type TaskActionImpl interface {
 	InitTimeoutTimer(*time.Timer)
 	TimeoutKill()
 	Kill()
+
+	Yield() *TaskActionResumeData
+	Resume(*TaskActionAwaitData, *TaskActionResumeData)
+
 	HookRun() error
+	SetAwaitData(awaitData TaskActionAwaitData)
+	GetAwaitData() TaskActionAwaitData
+	ClearAwaitData()
+
 	Log(format string, a ...any)
 }
 
 func AwaitTask(other TaskActionImpl) error {
 	AwaitChannel := make(chan TaskActionResumeData, 1)
-	other.InitOnFinish(func(err error) {
+	other.InitOnFinish(func(task TaskActionImpl, err error) {
 		AwaitChannel <- TaskActionResumeData{
 			Err:  err,
 			Data: nil,
@@ -64,44 +73,74 @@ type TaskActionBase struct {
 	Timeout         *time.Timer
 
 	finishLock sync.Mutex
-	finished   bool
+	finished   atomic.Bool
 	kill       atomic.Bool
 	result     error
-	onFinish   []func(error)
+	onFinish   []func(TaskActionImpl, error)
 }
 
 func NewTaskActionBase(timeoutDuration time.Duration, name string) *TaskActionBase {
 	t := &TaskActionBase{
 		timeoutDuration: timeoutDuration,
 		Name:            name,
-		AwaitChannel:    make(chan *TaskActionResumeData, 1),
 	}
 	return t
 }
 
-func (t *TaskActionBase) Yield(awaitData TaskActionAwaitData) *TaskActionResumeData {
+func (t *TaskActionBase) SetAwaitData(awaitData TaskActionAwaitData) {
+	t.AwaitData = awaitData
+	if t.AwaitChannel == nil {
+		t.AwaitChannel = make(chan *TaskActionResumeData, 1)
+		if t.GetTimeoutDuration() > 0 {
+			timeoutTimer := time.AfterFunc(t.GetTimeoutDuration(), func() {
+				t.TimeoutKill()
+			})
+			t.InitTimeoutTimer(timeoutTimer)
+		}
+	}
+}
+
+func (t *TaskActionBase) GetAwaitData() TaskActionAwaitData {
+	return t.AwaitData
+}
+
+func (t *TaskActionBase) ClearAwaitData() {
+	t.AwaitData = TaskActionAwaitData{}
+}
+
+// 需要提前 SetAwaitData
+func (t *TaskActionBase) Yield() *TaskActionResumeData {
 	if t.kill.Load() {
 		return &TaskActionResumeData{
 			Err: fmt.Errorf("task action killed"),
 		}
 	}
-	t.AwaitData = awaitData
+	if t.AwaitChannel == nil {
+		return &TaskActionResumeData{
+			Err: fmt.Errorf("task action not set await data"),
+		}
+	}
 	t.Impl.BeforeYield()
 	ret := <-t.AwaitChannel
-	t.AwaitData.WaitingId = 0
-	t.AwaitData.WaitingType = 0
+	t.AwaitData = TaskActionAwaitData{}
 	t.Impl.AfterYield()
 	return ret
 }
 
 func (t *TaskActionBase) Resume(awaitData *TaskActionAwaitData, resumeData *TaskActionResumeData) {
+	if t.AwaitChannel == nil {
+		return
+	}
 	if t.AwaitData.WaitingId == awaitData.WaitingId && t.AwaitData.WaitingType == awaitData.WaitingType {
 		t.AwaitChannel <- resumeData
 	}
 }
 
 func (t *TaskActionBase) TimeoutKill() {
-	if t.finished {
+	if t.finished.Load() {
+		return
+	}
+	if t.AwaitChannel == nil {
 		return
 	}
 	t.kill.Store(true)
@@ -110,11 +149,16 @@ func (t *TaskActionBase) TimeoutKill() {
 		t.AwaitChannel <- &TaskActionResumeData{
 			Err: fmt.Errorf("sys timeout"),
 		}
+	} else {
+		t.Finish(fmt.Errorf("sys timeout"))
 	}
 }
 
 func (t *TaskActionBase) Kill() {
-	if t.finished {
+	if t.finished.Load() {
+		return
+	}
+	if t.AwaitChannel == nil {
 		return
 	}
 	t.kill.Store(true)
@@ -123,6 +167,8 @@ func (t *TaskActionBase) Kill() {
 		t.AwaitChannel <- &TaskActionResumeData{
 			Err: fmt.Errorf("killed"),
 		}
+	} else {
+		t.Finish(fmt.Errorf("killed"))
 	}
 }
 
@@ -132,23 +178,21 @@ func (t *TaskActionBase) Finish(result error) {
 	}
 	if result != nil {
 		t.Impl.Log("Finish %s with error: %v", t.Name, result)
-	} else {
-		t.Impl.Log("Finish %s", t.Name)
 	}
 	t.finishLock.Lock()
 	defer t.finishLock.Unlock()
-	t.finished = true
+	t.finished.Store(true)
 	t.result = result
 	for _, fn := range t.onFinish {
-		fn(t.result)
+		fn(t.Impl, t.result)
 	}
 }
 
-func (t *TaskActionBase) InitOnFinish(fn func(error)) {
+func (t *TaskActionBase) InitOnFinish(fn func(TaskActionImpl, error)) {
 	t.finishLock.Lock()
 	defer t.finishLock.Unlock()
-	if t.finished {
-		fn(t.result)
+	if t.finished.Load() {
+		fn(t.Impl, t.result)
 		return
 	}
 	t.onFinish = append(t.onFinish, fn)
@@ -166,11 +210,11 @@ func (t *TaskActionBase) AwaitTask(other TaskActionImpl) error {
 		return fmt.Errorf("task action killed")
 	}
 	// 先设置等待数据，再注册回调，避免回调先于设置等待数据导致无法正确唤醒
-	t.AwaitData = TaskActionAwaitData{
+	t.SetAwaitData(TaskActionAwaitData{
 		WaitingType: TaskActionAwaitTypeNormal,
 		WaitingId:   other.GetTaskId(),
-	}
-	other.InitOnFinish(func(err error) {
+	})
+	other.InitOnFinish(func(task TaskActionImpl, err error) {
 		t.Resume(&TaskActionAwaitData{
 			WaitingType: TaskActionAwaitTypeNormal,
 			WaitingId:   other.GetTaskId(),
@@ -179,7 +223,7 @@ func (t *TaskActionBase) AwaitTask(other TaskActionImpl) error {
 			Data: nil,
 		})
 	})
-	resumeData := t.Yield(t.AwaitData)
+	resumeData := t.Yield()
 	return resumeData.Err
 }
 
@@ -193,9 +237,30 @@ func (t *TaskActionBase) AfterYield() {
 
 func (t *TaskActionBase) InitTaskId(id uint64) {
 	t.TaskId = id
-	t.finished = false
+	t.finished.Store(false)
 	t.result = nil
 	t.kill.Store(false)
+}
+
+// ResetForReuse 重置任务状态以便复用（不重新分配 AwaitChannel）。
+// 适用于压测场景中的任务对象重用。
+func (t *TaskActionBase) ResetForReuse() {
+	t.finished.Store(false)
+	t.result = nil
+	t.kill.Store(false)
+	t.AwaitData = TaskActionAwaitData{}
+	t.onFinish = t.onFinish[:0]
+	if t.Timeout != nil {
+		t.Timeout.Stop()
+		t.Timeout = nil
+	}
+	// 排空 AwaitChannel 中的残留数据
+	if t.AwaitChannel != nil {
+		select {
+		case <-t.AwaitChannel:
+		default:
+		}
+	}
 }
 
 func (t *TaskActionBase) GetTimeoutDuration() time.Duration {
@@ -207,15 +272,48 @@ func (t *TaskActionBase) InitTimeoutTimer(timer *time.Timer) {
 }
 
 type TaskActionManager struct {
-	taskIdMap   sync.Map
 	taskIdAlloc atomic.Uint64
+	wg          sync.WaitGroup
+
+	// 池模式
+	workerPool *ants.PoolWithFunc
+
+	// 普通模式
+	activeMu sync.Mutex
+	active   map[uint64]TaskActionImpl
 }
 
 func NewTaskActionManager() *TaskActionManager {
-	ret := &TaskActionManager{}
+	ret := &TaskActionManager{
+		active: make(map[uint64]TaskActionImpl),
+	}
 	ret.taskIdAlloc.Store(
 		uint64(time.Since(time.Unix(1577836800, 0)).Nanoseconds()))
 	return ret
+}
+
+// NewTaskActionManagerWithPool 创建使用 channel-based 协程池的 TaskActionManager。
+// poolSize 即 worker 数量和 channel 缓冲大小。
+func NewTaskActionManagerWithPool(poolSize int) *TaskActionManager {
+	if poolSize <= 0 {
+		poolSize = 256
+	}
+	ret := &TaskActionManager{}
+	ret.taskIdAlloc.Store(
+		uint64(time.Since(time.Unix(1577836800, 0)).Nanoseconds()))
+	ret.workerPool, _ = ants.NewPoolWithFunc(poolSize, func(i any) {
+		if task, ok := i.(TaskActionImpl); ok {
+			task.Finish(task.HookRun())
+		}
+	})
+	return ret
+}
+
+// ReleasePool 关闭 worker goroutine。
+func (m *TaskActionManager) ReleasePool() {
+	if m.workerPool != nil {
+		m.workerPool.Release()
+	}
 }
 
 func (m *TaskActionManager) allocTaskId() uint64 {
@@ -224,39 +322,48 @@ func (m *TaskActionManager) allocTaskId() uint64 {
 }
 
 func (m *TaskActionManager) WaitAll() {
-	AllTask := []TaskActionImpl{}
-	m.taskIdMap.Range(func(key, value any) bool {
-		AllTask = append(AllTask, value.(TaskActionImpl))
-		return true
-	})
-	for _, taskAction := range AllTask {
-		_ = AwaitTask(taskAction)
-	}
+	m.wg.Wait()
 }
 
 func (m *TaskActionManager) CloseAll() {
-	AllTask := []TaskActionImpl{}
-	m.taskIdMap.Range(func(key, value any) bool {
-		AllTask = append(AllTask, value.(TaskActionImpl))
-		return true
-	})
-	for _, taskAction := range AllTask {
-		taskAction.Kill()
+	if m.active == nil {
+		return
 	}
+	m.activeMu.Lock()
+	tasks := make([]TaskActionImpl, 0, len(m.active))
+	for _, t := range m.active {
+		tasks = append(tasks, t)
+	}
+	m.activeMu.Unlock()
+	for _, t := range tasks {
+		t.Kill()
+	}
+}
+
+func (m *TaskActionManager) OnTaskFinish(taskId uint64) {
+	if m.active != nil {
+		m.activeMu.Lock()
+		delete(m.active, taskId)
+		m.activeMu.Unlock()
+	}
+	m.wg.Done()
 }
 
 func (m *TaskActionManager) RunTaskAction(taskAction TaskActionImpl) {
 	taskAction.InitTaskId(m.allocTaskId())
-	m.taskIdMap.Store(taskAction.GetTaskId(), taskAction)
 
-	if taskAction.GetTimeoutDuration() > 0 {
-		timeoutTimer := time.AfterFunc(taskAction.GetTimeoutDuration(), func() {
-			taskAction.TimeoutKill()
-		})
-		taskAction.InitTimeoutTimer(timeoutTimer)
+	if m.active != nil {
+		m.activeMu.Lock()
+		m.active[taskAction.GetTaskId()] = taskAction
+		m.activeMu.Unlock()
 	}
-	go func() {
-		taskAction.Finish(taskAction.HookRun())
-		m.taskIdMap.Delete(taskAction.GetTaskId())
-	}()
+
+	m.wg.Add(1)
+	if m.workerPool != nil {
+		m.workerPool.Invoke(taskAction)
+	} else {
+		go func() {
+			taskAction.Finish(taskAction.HookRun())
+		}()
+	}
 }

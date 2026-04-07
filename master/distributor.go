@@ -65,7 +65,7 @@ func (m *Master) distributeAndWait(ctx context.Context, reportID, caseFileConten
 // distributeSingleCase 将一个 case 分发给各 agent 并等待完成。
 // distributeMode="copy": 每个 Agent 跑全量 OpenID 与 QPS（完全复制）
 // distributeMode="balance": 拆分 ID 范围与 QPS（负载均衡，默认）
-func (m *Master) distributeSingleCase(ctx context.Context, reportID string, caseIndex int, params robot_case.StressParams, targetGroup string, targetAgents []string, distributeMode string) error {
+func (m *Master) distributeSingleCase(ctx context.Context, reportID string, caseIndex int, params robot_case.Params, targetGroup string, targetAgents []string, distributeMode string) error {
 	// 构建 targetAgents 的快速查找集合
 	agentSet := make(map[string]struct{}, len(targetAgents))
 	for _, id := range targetAgents {
@@ -138,13 +138,7 @@ func (m *Master) distributeSingleCase(ctx context.Context, reportID string, case
 			split := params
 			split.OpenIDStart = start
 			split.OpenIDEnd = end
-			splitIDs := end - start
 
-			// 按比例拆分 BatchCount
-			split.BatchCount = (params.BatchCount + int64(len(agents)) - 1) / int64(len(agents))
-			if split.BatchCount > splitIDs {
-				split.BatchCount = splitIDs
-			}
 			// 按比例拆分 QPS
 			if params.TargetQPS > 0 {
 				split.TargetQPS = params.TargetQPS / float64(len(agents))
@@ -364,12 +358,12 @@ func (m *Master) aggregateAndGenerate(reportID string) error {
 }
 
 // parseCaseContent 解析 case 文件内容，返回 (是否 stress, 各行参数)。
-func parseCaseContent(content string) (bool, []robot_case.StressParams) {
+func parseCaseContent(content string) (bool, []robot_case.Params) {
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	isStress := false
 	firstNonEmpty := true
 
-	var lines []robot_case.StressParams
+	var lines []robot_case.Params
 	for scanner.Scan() {
 		raw := scanner.Text()
 		// 去注释
@@ -404,6 +398,7 @@ func parseCaseContent(content string) (bool, []robot_case.StressParams) {
 			log.Printf("[Master] skip line parse error: %s", errMsg)
 			continue
 		}
+		params.CaseIndex = len(lines)
 		lines = append(lines, params)
 	}
 	return isStress, lines

@@ -15,7 +15,8 @@ import (
 // Reads decode the atgateway v2 wire format into payloads, while writes expect
 // callers to provide a fully encoded frame.
 type TCPConnection struct {
-	conn net.Conn
+	conn    net.Conn
+	readBuf []byte // 预分配的读缓冲区，避免每次 ReadMessage 分配
 
 	mu     sync.Mutex
 	closed bool
@@ -28,7 +29,7 @@ func DialTCP(address string) (robotconn.Connection, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &TCPConnection{conn: c}, nil
+	return &TCPConnection{conn: c, readBuf: make([]byte, 0, 4096)}, nil
 }
 
 // ReadMessage reads one complete framed message from the TCP stream.
@@ -42,18 +43,24 @@ func (t *TCPConnection) ReadMessage() ([]byte, error) {
 	expectedHash := binary.LittleEndian.Uint32(header[0:4])
 	msgLen := binary.LittleEndian.Uint32(header[4:8])
 
-	// Read the payload.
-	payload := make([]byte, msgLen)
-	if _, err := io.ReadFull(t.conn, payload); err != nil {
+	// Read the payload, reusing pre-allocated buffer.
+	if cap(t.readBuf) >= int(msgLen) {
+		t.readBuf = t.readBuf[:msgLen]
+	} else {
+		t.readBuf = make([]byte, msgLen)
+	}
+	if _, err := io.ReadFull(t.conn, t.readBuf); err != nil {
 		return nil, err
 	}
 
-	actualHash := MurmurHash3X86_32(payload, 0)
+	actualHash := MurmurHash3X86_32(t.readBuf, 0)
 	if actualHash != expectedHash {
 		return nil, fmt.Errorf("frame hash mismatch: expected 0x%08x, got 0x%08x", expectedHash, actualHash)
 	}
 
-	return payload, nil
+	// 注意：返回的切片在下次 ReadMessage 调用后失效。
+	// 调用方（GatewayConnection.readNextFrame）在 DecodeMessage 中同步消费后即可。
+	return t.readBuf, nil
 }
 
 // WriteMessage writes a fully encoded wire-format frame to the TCP stream.

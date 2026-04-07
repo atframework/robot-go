@@ -1,11 +1,10 @@
 package atsf4g_go_robot_cmd
 
 import (
-	"fmt"
 	"strconv"
-	"sync"
 	"sync/atomic"
 
+	lu "github.com/atframework/atframe-utils-go/lang_utility"
 	base "github.com/atframework/robot-go/base"
 	user_data "github.com/atframework/robot-go/data"
 	utils "github.com/atframework/robot-go/utils"
@@ -14,9 +13,8 @@ import (
 
 func init() {
 	utils.RegisterCommandDefaultTimeout([]string{"user", "show_all_login_user"}, func(action base.TaskActionImpl, cmd []string) string {
-		userMapLock.Lock()
-		defer userMapLock.Unlock()
-		for _, v := range userMapContainer {
+		users := user_data.GetAllUsers()
+		for _, v := range users {
 			action.Log("%d", v.GetUserId())
 		}
 		return ""
@@ -31,14 +29,12 @@ func init() {
 			return err.Error()
 		}
 
-		userMapLock.Lock()
-		v, ok := userMapContainer[strconv.FormatUint(uint64(userId), 10)]
-		userMapLock.Unlock()
-		if !ok {
+		holder := user_data.UserContainerTryGetUser(strconv.FormatUint(uint64(userId), 10))
+		if holder == nil || lu.IsNil(holder.User) {
 			return "not found user"
 		}
 
-		SetCurrentUser(v)
+		SetCurrentUser(holder.User)
 		return ""
 	}, "<userId>", "切换登录User", AutoCompleteUseIdWithoutCurrent)
 }
@@ -73,33 +69,19 @@ func SetCurrentUser(user user_data.User) {
 	}
 }
 
-var (
-	userMapContainer map[string]user_data.User
-	userMapLock      sync.Mutex
-)
-
-func MutableUserMapContainer() map[string]user_data.User {
-	if userMapContainer == nil {
-		userMapContainer = make(map[string]user_data.User)
-	}
-	return userMapContainer
-}
-
 func AutoCompleteUseId(string) []string {
-	userMapLock.Lock()
-	defer userMapLock.Unlock()
+	users := user_data.GetAllUsers()
 	var res []string
-	for _, k := range userMapContainer {
+	for _, k := range users {
 		res = append(res, strconv.FormatUint(k.GetUserId(), 10))
 	}
 	return res
 }
 
 func AutoCompleteUseIdWithoutCurrent(string) []string {
-	userMapLock.Lock()
-	defer userMapLock.Unlock()
 	var res []string
-	for _, k := range userMapContainer {
+	users := user_data.GetAllUsers()
+	for _, k := range users {
 		if k.GetUserId() == GetCurrentUser().GetUserId() {
 			continue
 		}
@@ -117,7 +99,7 @@ func CurrentUserRunTaskDefaultTimeout(f func(*user_data.TaskActionUser) error, n
 	return user.RunTaskDefaultTimeout(f, name)
 }
 
-type UserCommandFunc func(base.TaskActionImpl, user_data.User, []string) string
+type UserCommandFunc func(base.TaskActionImpl, user_data.User, []string) error
 
 type UserCommandNode struct {
 	Children map[string]*UserCommandNode
@@ -168,54 +150,4 @@ func GetUserCommandFunc(path []string) ([]string, UserCommandFunc) {
 		ret = ret[1:]
 	}
 	return ret, current.Func
-}
-
-func LogoutAllUsers() {
-	userMapLock.Lock()
-	userMapContainerCopy := userMapContainer
-	userMapContainer = make(map[string]user_data.User)
-	userMapLock.Unlock()
-
-	for _, v := range userMapContainerCopy {
-		v.Logout()
-	}
-	for _, v := range userMapContainerCopy {
-		v.AwaitReceiveHandlerClose()
-	}
-}
-
-func CmdCreateUser(action base.TaskActionImpl, openId string) (user_data.User, error) {
-	userMapLock.Lock()
-	if existingUser, ok := MutableUserMapContainer()[openId]; ok && existingUser != nil {
-		userMapLock.Unlock()
-		return nil, fmt.Errorf("User already logged in")
-	}
-	userMapLock.Unlock()
-
-	// 创建角色
-	u := user_data.CreateUser(openId, action.Log, true)
-	if u == nil {
-		return nil, fmt.Errorf("Failed to create user")
-	}
-
-	userMapLock.Lock()
-	MutableUserMapContainer()[openId] = u
-	userMapLock.Unlock()
-
-	u.AddOnClosedHandler(func(user user_data.User) {
-		userMapLock.Lock()
-		defer userMapLock.Unlock()
-
-		u, ok := MutableUserMapContainer()[openId]
-		if !ok || u != user {
-			return
-		}
-		delete(MutableUserMapContainer(), openId)
-		user.Log("Remove User: %s", openId)
-
-		if GetCurrentUser() == user {
-			SetCurrentUser(nil)
-		}
-	})
-	return u, nil
 }

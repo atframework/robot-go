@@ -1,0 +1,461 @@
+package atsf4g_go_robot_case
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	lu "github.com/atframework/atframe-utils-go/lang_utility"
+	log "github.com/atframework/atframe-utils-go/log"
+	base "github.com/atframework/robot-go/base"
+	user_data "github.com/atframework/robot-go/data"
+	report "github.com/atframework/robot-go/report"
+	utils "github.com/atframework/robot-go/utils"
+)
+
+var (
+	ProgressBarTotalCount   atomic.Int64
+	ProgressBarCurrentCount atomic.Int64
+
+	FailedCount      atomic.Int64
+	TotalFailedCount atomic.Int64
+)
+
+func init() {
+	utils.RegisterCommand([]string{"run-case"}, CmdRunCase, "<case name> <openid-prefix> <user-count> <batch-count> <run-time> <args>", "运行用例", AutoCompleteCaseName, 0)
+	utils.RegisterCommand([]string{"run-case-file"}, CmdRunCaseFile, "<file> <repeated_time>", "运行用例文件", AutoCompleteCaseName, 0)
+}
+
+func CmdRunCase(task base.TaskActionImpl, cmd []string) string {
+	return RunCase(task, cmd, 0, time.Now())
+}
+
+func CmdRunCaseFile(task base.TaskActionImpl, cmd []string) string {
+	if len(cmd) < 2 {
+		return "Args Error"
+	}
+	repeatedTime, err := strconv.ParseInt(cmd[1], 10, 32)
+	if err != nil {
+		return err.Error()
+	}
+
+	if runErr := RunCaseFile(cmd[0], int32(repeatedTime)); runErr != nil {
+		return runErr.Error()
+	}
+	return ""
+}
+
+func RefreshProgressBar() {
+	countProgressBar := ""
+	width := 25
+	var progress float64 = 0
+	totalCount := ProgressBarTotalCount.Load()
+	if totalCount != 0 {
+		progress = float64(ProgressBarCurrentCount.Load()) / float64(totalCount)
+		completed := int(progress * float64(width))
+		countProgressBar = fmt.Sprintf("[%-*s] %d/%d", width, strings.Repeat("#", completed), ProgressBarCurrentCount.Load(), totalCount)
+		utils.StdoutLog(fmt.Sprintf("Total:%s || Failed:%d             ", countProgressBar, FailedCount.Load()))
+		if ProgressBarCurrentCount.Load() >= totalCount {
+			return
+		}
+	}
+}
+
+func ClearProgressBar() {
+	ProgressBarTotalCount.Store(0)
+	ProgressBarCurrentCount.Store(0)
+	FailedCount.Store(0)
+}
+
+func InitProgressBar(totalCount int64) {
+	ProgressBarTotalCount.Add(totalCount)
+}
+
+func AddProgressBarCount() {
+	ProgressBarCurrentCount.Add(1)
+}
+
+func runCaseWait(pendingCase []chan string) error {
+	if len(pendingCase) == 0 {
+		return nil
+	}
+	stopCh := make(chan struct{})
+	stopedCh := make(chan struct{}, 1)
+	go func() {
+		RefreshProgressBar()
+		for {
+			select {
+			case <-time.After(time.Second):
+				RefreshProgressBar()
+			case <-stopCh:
+				RefreshProgressBar()
+				ClearProgressBar()
+				stopedCh <- struct{}{}
+				return
+			}
+		}
+	}()
+	for _, ch := range pendingCase {
+		result := <-ch
+		if result != "" {
+			return fmt.Errorf("Run Case Failed: %s", result)
+		}
+	}
+	close(stopCh)
+	<-stopedCh
+	return nil
+}
+
+func RunCaseFile(caseFile string, repeatedTime int32) error {
+	file, err := os.Open(caseFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	beginTime := time.Now()
+
+	for index := int32(0); index < repeatedTime; index++ {
+		utils.StdoutLog(fmt.Sprintf("Run Case File: %s, Repeated Time: %d/%d", caseFile, index+1, repeatedTime))
+		if _, err = file.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		scanner := bufio.NewScanner(file)
+		var caseIndex int32 = 0
+		var pendingCase []chan string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if idx := strings.Index(line, "#"); idx >= 0 {
+				line = line[:idx]
+			}
+			line = strings.TrimSpace(line)
+			if len(line) == 0 {
+				continue
+			}
+
+			args := strings.Fields(line)
+			if len(args) == 0 {
+				continue
+			}
+
+			batchPending := false
+			if strings.ToLower(args[len(args)-1]) == "&" {
+				args = args[:len(args)-1]
+				batchPending = true
+			}
+
+			if len(args) == 0 {
+				continue
+			}
+
+			caseIndex++
+			currentCaseIndex := caseIndex
+
+			waitingChan := make(chan string, 1)
+			lineArgs := args
+			go func() {
+				waitingChan <- RunCase(nil, lineArgs, currentCaseIndex, beginTime)
+			}()
+			pendingCase = append(pendingCase, waitingChan)
+
+			if batchPending {
+				continue
+			} else {
+				err = runCaseWait(pendingCase)
+				if err != nil {
+					return err
+				}
+				pendingCase = pendingCase[:0]
+			}
+		}
+
+		err = runCaseWait(pendingCase)
+		if err != nil {
+			return err
+		}
+
+		if err := scanner.Err(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func RunCase(_ base.TaskActionImpl, cmd []string, caseIndex int32, beginTime time.Time) string {
+	if len(cmd) < 6 {
+		return "Args Error"
+	}
+
+	caseName := cmd[0]
+	openIdPrefix := cmd[1]
+	if openIdPrefix == "" {
+		return "OpenId Prefix Empty"
+	}
+
+	userCount, err := strconv.ParseInt(cmd[2], 10, 32)
+	if err != nil {
+		return err.Error()
+	}
+	if userCount <= 0 {
+		return "User Count Must Greater Than 0"
+	}
+
+	tps, err := strconv.ParseInt(cmd[3], 10, 32)
+	if err != nil {
+		return err.Error()
+	}
+
+	userBatchCount, err := strconv.ParseInt(cmd[4], 10, 32)
+	if err != nil {
+		return err.Error()
+	}
+
+	runTime, err := strconv.ParseInt(cmd[5], 10, 32)
+	if err != nil {
+		return err.Error()
+	}
+
+	return RunCaseInner(context.Background(), Params{
+		CaseName:       caseName,
+		CaseIndex:      int(caseIndex),
+		ErrorBreak:     true,
+		OpenIDPrefix:   openIdPrefix,
+		OpenIDStart:    0,
+		OpenIDEnd:      userCount,
+		TargetQPS:      float64(tps),
+		RunTime:        runTime,
+		UserBatchCount: userBatchCount,
+		ExtraArgs:      cmd[6:],
+	}, nil, nil, true, true)
+}
+
+func RunCaseInner(
+	ctx context.Context,
+	params Params,
+	tracer report.Tracer,
+	pressure report.PressureController,
+	enableLog bool,
+	progressBar bool,
+) string {
+	caseName := params.CaseName
+	caseAction, ok := caseMapContainer[caseName]
+	if !ok {
+		return "Case Not Found"
+	}
+
+	userCount := params.UserCount()
+	if userCount <= 0 {
+		return "ID range is empty"
+	}
+
+	runTime := params.RunTime
+	if runTime <= 0 {
+		runTime = 1
+	}
+
+	userBatchCount := params.UserBatchCount
+	if userBatchCount <= 0 {
+		userBatchCount = 1
+	}
+
+	beginTime := time.Now()
+	totalCount := userCount * runTime
+
+	qpsCtrl := NewQPSController(params.TargetQPS)
+	defer qpsCtrl.Stop()
+
+	// 如果有 pressure controller，将 qps 控制与压力检测联动
+	if pressure != nil {
+		pressure.SetTargetQPS(params.TargetQPS)
+		pressure.Start(time.Second)
+		defer pressure.Stop()
+	}
+
+	if progressBar {
+		InitProgressBar(totalCount)
+	}
+
+	var logHandler func(openId string, format string, a ...any) = nil
+	if enableLog {
+		bufferWriter, _ := log.NewLogBufferedRotatingWriter(nil,
+			fmt.Sprintf("../log/%d.%s.%s.%%N.log", params.CaseIndex, caseName, beginTime.Format("15.04.05")), "", 10*1024*1024, 3, time.Second*3, 0)
+		logHandler = func(openId string, format string, a ...any) {
+			logString := fmt.Sprintf("[%s][%s]: %s", time.Now().Format("2006-01-02 15:04:05.000"), openId, fmt.Sprintf(format, a...))
+			bufferWriter.Write(lu.StringtoBytes(logString))
+		}
+		defer func() {
+			bufferWriter.Close()
+			bufferWriter.AwaitClose()
+		}()
+
+		logHandler("System", "Case[%s] Start, Index[%d] Users: %d, QPS: %.1f, RunTime: %d, ErrorBreak: %v",
+			caseName, params.CaseIndex, userCount, params.TargetQPS, runTime, params.ErrorBreak)
+	}
+
+	var failedCount atomic.Int64
+	var errorBreakTriggered atomic.Bool
+
+	// Worker 数量：GOMAXPROCS/2
+	// 直接执行模型中每个 worker 持有一个 task，过多 worker 反而增加调度开销。
+	workers := runtime.GOMAXPROCS(0) / 2
+	if workers < 1 {
+		workers = 1
+	}
+
+	type workerData struct {
+		workerIndex       int
+		totalTaskCount    int64
+		finishedTaskCount int64
+		userHolderChannel chan *user_data.UserHolder
+	}
+
+	type userPrivateData struct {
+		finishTaskCount int32
+		totalTaskCount  int32
+	}
+
+	if workers > int(userCount) {
+		workers = int(userCount)
+	}
+
+	// 初始化 worker 数据结构，每个 worker 持有一个 openId channel，避免竞争
+	workerDatas := make([]*workerData, workers)
+	for i := 0; i < workers; i++ {
+		workerDatas[i] = &workerData{
+			workerIndex:       i,
+			userHolderChannel: make(chan *user_data.UserHolder, (userCount/int64(workers))+1),
+		}
+	}
+
+	// 格式化所有 openId 字符串 分配入worker
+	openIds := make([]string, userCount)
+	for i := int64(0); i < userCount; i++ {
+		openIds[i] = params.OpenIDPrefix + strconv.FormatInt(params.OpenIDStart+i, 10)
+		workerIndex := int(i % int64(workers))
+		userHolder := user_data.UserContainerGetUser(openIds[i])
+		userHolder.PrivateData = &userPrivateData{
+			totalTaskCount: int32(runTime),
+		}
+		workerDatas[workerIndex].userHolderChannel <- userHolder
+		workerDatas[workerIndex].totalTaskCount += runTime
+	}
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(workerData *workerData) {
+			defer wg.Done()
+
+			mgr := base.NewTaskActionManagerWithPool(4096)
+			defer mgr.ReleasePool()
+
+			var runTaskCount int64
+
+			onFinishFunc := func(task base.TaskActionImpl, err error) {
+				privateData := task.(*TaskActionCase).UserHolder.PrivateData.(*userPrivateData)
+				privateData.finishTaskCount += 1
+				if privateData.finishTaskCount < privateData.totalTaskCount {
+					workerData.userHolderChannel <- task.(*TaskActionCase).UserHolder
+				}
+				if progressBar {
+					AddProgressBarCount()
+				}
+				if err != nil {
+					failedCount.Add(1)
+					FailedCount.Add(1)
+					TotalFailedCount.Add(1)
+					task.Log("Case[%s] Failed: %v", caseName, err)
+					if params.ErrorBreak {
+						errorBreakTriggered.Store(true)
+					}
+				}
+				if pressure != nil {
+					pressure.DonePending()
+				}
+				mgr.OnTaskFinish(task.GetTaskId())
+			}
+
+			taskActionPool := sync.Pool{
+				New: func() any {
+					task := &TaskActionCase{
+						TaskActionBase: *base.NewTaskActionBase(caseAction.timeout, "Case Runner Worker"),
+						Fn:             caseAction.fun,
+						logHandler:     logHandler,
+						Args:           params.ExtraArgs,
+						NeedLog:        enableLog,
+					}
+					if len(params.ExtraArgs) > 0 {
+						task.Args = params.ExtraArgs
+					}
+					task.TaskActionBase.Impl = task
+					return task
+				},
+			}
+
+			for {
+				if errorBreakTriggered.Load() {
+					return
+				}
+				if ctx.Err() != nil {
+					return
+				}
+
+				userHolder := <-workerData.userHolderChannel
+				// 通过worker分片openid，避免竞争
+				task := taskActionPool.Get().(*TaskActionCase)
+				task.ResetForReuse()
+				task.UserHolder = userHolder
+				task.InitOnFinish(onFinishFunc)
+
+				// QPS 控制: 联动 pressure
+				if pressure != nil && params.TargetQPS > 0 {
+					effective := pressure.EffectiveQPS()
+					qpsCtrl.SetQPS(math.Max(effective, 1))
+				}
+				qpsCtrl.Acquire()
+
+				if pressure != nil {
+					pressure.AddPending()
+				}
+
+				// 打点
+				if tracer != nil {
+					task.TracerEntry = tracer.NewEntry(caseName).Start()
+				}
+
+				mgr.RunTaskAction(task)
+				runTaskCount++
+				if runTaskCount >= workerData.totalTaskCount {
+					break
+				}
+			}
+			mgr.WaitAll()
+		}(workerDatas[w])
+	}
+	wg.Wait()
+
+	useTime := time.Since(beginTime).String()
+	if enableLog {
+		logHandler("System", "Case[%s:%d]  Completed, Total Time: %s", caseName, params.CaseIndex, useTime)
+	}
+
+	if ctx.Err() != nil {
+		return fmt.Sprintf("Case[%s:%d] Cancelled, Total Time: %s", caseName, params.CaseIndex, useTime)
+	}
+
+	if failedCount.Load() != 0 {
+		return fmt.Sprintf("Case[%s:%d] Complete With %d Failed, Total Time: %s", caseName, params.CaseIndex, failedCount.Load(), useTime)
+	}
+	utils.StdoutLog(fmt.Sprintf("Case[%s:%d] All Success, Total Time: %s", caseName, params.CaseIndex, useTime))
+	return ""
+}
