@@ -31,9 +31,9 @@ func (m *Master) distributeAndWait(ctx context.Context, reportID, caseFileConten
 	}
 
 	// 解析 case 文件
-	isStress, lines := parseCaseContent(caseFileContent)
-	if !isStress {
-		return fmt.Errorf("only #!stress mode case files are supported for distributed execution")
+	err, lines := parseCaseContent(caseFileContent)
+	if err != nil {
+		return err
 	}
 	if len(lines) == 0 {
 		return fmt.Errorf("no case lines found")
@@ -358,31 +358,19 @@ func (m *Master) aggregateAndGenerate(reportID string) error {
 }
 
 // parseCaseContent 解析 case 文件内容，返回 (是否 stress, 各行参数)。
-func parseCaseContent(content string) (bool, []robot_case.Params) {
+func parseCaseContent(content string) (error, []robot_case.Params) {
 	scanner := bufio.NewScanner(strings.NewReader(content))
-	isStress := false
-	firstNonEmpty := true
 
 	var lines []robot_case.Params
 	for scanner.Scan() {
 		raw := scanner.Text()
 		// 去注释
 		if idx := strings.Index(raw, "#"); idx >= 0 {
-			if firstNonEmpty && strings.TrimSpace(raw) == "#!stress" {
-				isStress = true
-				firstNonEmpty = false
-				continue
-			}
 			raw = raw[:idx]
 		}
 		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
-		}
-		firstNonEmpty = false
-
-		if !isStress {
-			continue // 只支持 stress 模式分发
 		}
 
 		args := strings.Fields(line)
@@ -393,15 +381,14 @@ func parseCaseContent(content string) (bool, []robot_case.Params) {
 			continue
 		}
 
-		params, errMsg := robot_case.ParseStressLine(args)
-		if errMsg != "" {
-			log.Printf("[Master] skip line parse error: %s", errMsg)
-			continue
+		params, err := robot_case.ParseStressLine(args)
+		if err != nil {
+			return err, nil
 		}
 		params.CaseIndex = len(lines)
 		lines = append(lines, params)
 	}
-	return isStress, lines
+	return nil, lines
 }
 
 // RegisterAgentFromRedis 从 Redis 恢复已注册的 Agent

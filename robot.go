@@ -40,12 +40,15 @@ func NewRobotFlagSet() *flag.FlagSet {
 	flagSet.String("compression", "none", "atgateway Mod: compression algorithm list: none, zstd, lz4, snappy, zlib")
 
 	// 分布式模式
-	flagSet.String("mode", "", "run mode: (empty)=standalone, agent")
+	flagSet.String("mode", "", "run mode: (empty)=standalone, agent, solo")
 	flagSet.String("redis-addr", "localhost:6379", "Redis address for distributed mode")
 	flagSet.String("redis-pwd", "", "Redis password")
 	flagSet.String("master-addr", "", "Master HTTP address (agent mode)")
 	flagSet.String("agent-id", "", "Agent ID (auto-generated if empty)")
 	flagSet.String("agent-group", "", "Agent group ID (for group-based task distribution)")
+
+	// 单节点压测模式
+	flagSet.String("report-id", "", "report ID (solo mode, default: timestamp)")
 	return flagSet
 }
 
@@ -136,6 +139,10 @@ func StartRobot(flagSet *flag.FlagSet, unpack user_interface.UserReceiveUnpackFu
 	case "agent":
 		fmt.Println("Starting in Agent mode")
 		startAgent(flagSet, unpack, createMsg)
+		return
+	case "solo":
+		fmt.Println("Starting in Solo mode (single-node stress test)")
+		startSolo(flagSet)
 		return
 	}
 

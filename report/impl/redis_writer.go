@@ -86,3 +86,15 @@ func (w *RedisReportWriter) BarrierACK(reportID string, caseIndex int) error {
 }
 
 var _ report.ReportWriter = (*RedisReportWriter)(nil)
+
+// GenerateUniqueReportID 使用 Redis INCR 生成全局唯一的 ReportID。
+// 格式：{timestamp}-{seq}，其中 seq 由 Redis key "report:id:seq" 自增获得。
+func GenerateUniqueReportID(client *redis.Client) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	seq, err := client.Incr(ctx, "report:id:seq").Result()
+	if err != nil {
+		return "", fmt.Errorf("redis INCR report:id:seq: %w", err)
+	}
+	return fmt.Sprintf("%s-%d", time.Now().Format("20060102-150405"), seq), nil
+}

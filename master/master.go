@@ -238,7 +238,12 @@ func (m *Master) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		req.RepeatedTime = 1
 	}
 	if req.ReportID == "" {
-		req.ReportID = time.Now().Format("20060102-150405")
+		var err error
+		req.ReportID, err = report_impl.GenerateUniqueReportID(m.redis)
+		if err != nil {
+			http.Error(w, "generate report ID: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	if req.DistributeMode == "" {
 		req.DistributeMode = "balance"
