@@ -27,8 +27,11 @@ type QPSController struct {
 // 1 token = tokenScale 内部单位。
 const tokenScale int64 = 1_000_000
 
-// maxBurstTokens 令牌上限 = 2 * tokenScale（即最多累积 2 个未消费令牌）
-const maxBurstTokens = 2 * tokenScale
+// minBurstTokens 令牌下限 = 2 个令牌
+const minBurstTokens = 2 * tokenScale
+
+// burstWindow 令牌上限的计算窗口：允许累积 burstWindow 时长的令牌
+const burstWindow = 50 * time.Millisecond
 
 // refillerInterval refiller 协程的补充间隔
 const refillerInterval = time.Millisecond
@@ -72,9 +75,13 @@ func (q *QPSController) refiller() {
 			}
 
 			cur := q.tokens.Add(add)
-			// 限制上限
-			if cur > maxBurstTokens {
-				q.tokens.Add(-(cur - maxBurstTokens))
+			// 动态令牌上限：max(2 tokens, 50ms 等值令牌)，避免高 QPS 下被固定上限截断
+			burstCap := target * int64(burstWindow) / int64(time.Second)
+			if burstCap < minBurstTokens {
+				burstCap = minBurstTokens
+			}
+			if cur > burstCap {
+				q.tokens.Add(-(cur - burstCap))
 			}
 
 			// Broadcast 唤醒所有等待中的 worker

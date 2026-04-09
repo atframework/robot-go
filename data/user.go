@@ -135,7 +135,11 @@ func UserContainerDelUser(holder *UserHolder) {
 // LogoutAllUsers 登出并清理所有在线用户
 func LogoutAllUsers() {
 	userMapContainer.Range(func(_, value any) bool {
-		value.(*UserHolder).Logout()
+		holder := value.(*UserHolder)
+		if lu.IsNil(holder.User) {
+			return true
+		}
+		holder.Logout()
 		return true
 	})
 	userMapContainer.Clear()
