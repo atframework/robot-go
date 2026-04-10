@@ -274,11 +274,15 @@ func RunCaseInner(
 	qpsCtrl := NewQPSController(params.TargetQPS)
 	defer qpsCtrl.Stop()
 
-	// 如果有 pressure controller，将 qps 控制与压力检测联动
+	// 自适应模式：未设定 QPS 时，由 PressureController 从低到高探测最优速率
+	adaptiveMode := params.TargetQPS <= 0 && pressure != nil
 	if pressure != nil {
 		pressure.SetTargetQPS(params.TargetQPS)
 		pressure.Start(time.Second)
 		defer pressure.Stop()
+		if adaptiveMode {
+			qpsCtrl.SetQPS(pressure.EffectiveQPS())
+		}
 	}
 
 	if progressBar {
@@ -379,7 +383,9 @@ func RunCaseInner(
 						errorBreakTriggered.Store(true)
 					}
 				}
-				if pressure != nil {
+				if adaptiveMode {
+					latency := time.Since(task.(*TaskActionCase).DispatchedAt)
+					pressure.RecordLatency(latency)
 					pressure.DonePending()
 				}
 				mgr.OnTaskFinish(task.GetTaskId())
@@ -417,15 +423,15 @@ func RunCaseInner(
 				task.UserHolder = userHolder
 				task.InitOnFinish(onFinishFunc)
 
-				// QPS 控制: 联动 pressure
-				if pressure != nil && params.TargetQPS > 0 {
-					effective := pressure.EffectiveQPS()
-					qpsCtrl.SetQPS(math.Max(effective, 1))
+				// QPS 控制: 自适应模式下由 PressureController 驱动速率
+				if adaptiveMode {
+					qpsCtrl.SetQPS(math.Max(pressure.EffectiveQPS(), 1))
 				}
 				qpsCtrl.Acquire()
 
-				if pressure != nil {
+				if adaptiveMode {
 					pressure.AddPending()
+					task.DispatchedAt = time.Now()
 				}
 
 				// 打点

@@ -77,6 +77,8 @@ type metricsDataEntry struct {
 // chartSeriesData 按秒聚合的单条 case 时间序列
 type chartSeriesData struct {
 	Name       string           `json:"name"`
+	MinTime    string           `json:"minTime,omitempty"`
+	MaxTime    string           `json:"maxTime,omitempty"`
 	QPS        []int            `json:"qps"`
 	Success    []int            `json:"success"`
 	Failed     []int            `json:"failed"`
@@ -87,6 +89,7 @@ type chartSeriesData struct {
 
 type chartData struct {
 	TimeLabels []string          `json:"timeLabels"`
+	StartEpoch int64             `json:"startEpoch,omitempty"`
 	Series     []chartSeriesData `json:"series"`
 }
 
@@ -328,12 +331,39 @@ func (g *EChartsHTMLGenerator) processTracings(td *templateData, records []*repo
 	sort.Slice(secs, func(i, j int) bool { return secs[i] < secs[j] })
 
 	cd := chartData{TimeLabels: make([]string, len(secs))}
-	for i, sec := range secs {
-		cd.TimeLabels[i] = time.Unix(sec, 0).Format("15:04:05")
+	if len(secs) > 0 {
+		cd.StartEpoch = secs[0]
 	}
+	for i, sec := range secs {
+		cd.TimeLabels[i] = time.Unix(sec, 0).Format("2006-01-02 15:04:05")
+	}
+
+	// 计算每个 Case 的活跃时间范围
+	caseMinSec := make(map[string]int64)
+	caseMaxSec := make(map[string]int64)
+	for _, name := range caseOrder {
+		first := true
+		for sec := range caseBuckets[name] {
+			if first {
+				caseMinSec[name] = sec
+				caseMaxSec[name] = sec
+				first = false
+			} else {
+				if sec < caseMinSec[name] {
+					caseMinSec[name] = sec
+				}
+				if sec > caseMaxSec[name] {
+					caseMaxSec[name] = sec
+				}
+			}
+		}
+	}
+
 	for _, name := range caseOrder {
 		sd := chartSeriesData{
 			Name:       name,
+			MinTime:    time.Unix(caseMinSec[name], 0).Format("2006-01-02 15:04:05"),
+			MaxTime:    time.Unix(caseMaxSec[name], 0).Format("2006-01-02 15:04:05"),
 			QPS:        make([]int, len(secs)),
 			Success:    make([]int, len(secs)),
 			Failed:     make([]int, len(secs)),
@@ -460,7 +490,7 @@ func (g *EChartsHTMLGenerator) processMetrics(td *templateData, series []*report
 		times := make([]string, len(s.Points))
 		values := make([]float64, len(s.Points))
 		for i, pt := range s.Points {
-			times[i] = pt.Timestamp.Format("15:04:05")
+			times[i] = pt.Timestamp.Format("2006-01-02 15:04:05")
 			values[i] = math.Round(pt.Value*100) / 100
 		}
 		labelsStr := ""
@@ -521,6 +551,8 @@ func (g *EChartsHTMLGenerator) buildChartsFromMetrics(td *templateData, series [
 		varianceMs map[string]float64
 		minMs      map[string]float64
 		maxMs      map[string]float64
+		minTime    string
+		maxTime    string
 	}
 	newCTS := func() *caseTimeSeries {
 		return &caseTimeSeries{
@@ -559,8 +591,14 @@ func (g *EChartsHTMLGenerator) buildChartsFromMetrics(td *templateData, series [
 		}
 		cts := caseMap[caseName]
 		for _, pt := range filterMetricPoints(s.Points, startTime, endTime) {
-			t := pt.Timestamp.Format("15:04:05")
+			t := pt.Timestamp.Format("2006-01-02 15:04:05")
 			allSecsSet[t] = true
+			if cts.minTime == "" || t < cts.minTime {
+				cts.minTime = t
+			}
+			if cts.maxTime == "" || t > cts.maxTime {
+				cts.maxTime = t
+			}
 			switch matchedSuffix {
 			case "_qps":
 				cts.qps[t] = pt.Value
@@ -596,11 +634,18 @@ func (g *EChartsHTMLGenerator) buildChartsFromMetrics(td *templateData, series [
 
 	n := len(timeLabels)
 	cd := chartData{TimeLabels: timeLabels}
+	if len(timeLabels) > 0 {
+		if t, err := time.ParseInLocation("2006-01-02 15:04:05", timeLabels[0], time.Local); err == nil {
+			cd.StartEpoch = t.Unix()
+		}
+	}
 
 	for _, caseName := range caseOrder {
 		cts := caseMap[caseName]
 		sd := chartSeriesData{
 			Name:       caseName,
+			MinTime:    cts.minTime,
+			MaxTime:    cts.maxTime,
 			QPS:        make([]int, n),
 			Success:    make([]int, n),
 			Failed:     make([]int, n),
@@ -683,7 +728,7 @@ func (g *EChartsHTMLGenerator) processOnlineUsers(td *templateData, series []*re
 	// 按 agent 名称聚合：同一 Agent 的多条系列合并，相同时间戳覆盖取最新值
 	type agentPoints struct {
 		name   string
-		points map[string]float64 // "15:04:05" -> value
+		points map[string]float64 // "2006-01-02 15:04:05" -> value
 	}
 	agentOrder := make([]string, 0)
 	agentMap := make(map[string]*agentPoints)
@@ -700,7 +745,7 @@ func (g *EChartsHTMLGenerator) processOnlineUsers(td *templateData, series []*re
 			agentMap[name] = ap
 		}
 		for _, pt := range s.Points {
-			t := pt.Timestamp.Format("15:04:05")
+			t := pt.Timestamp.Format("2006-01-02 15:04:05")
 			ap.points[t] = math.Round(pt.Value*100) / 100
 		}
 	}
@@ -783,6 +828,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica N
 .hdr{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:28px 40px}
 .hdr h1{font-size:22px;margin-bottom:6px}
 .hdr .meta{font-size:13px;opacity:.85}
+.hdr .actions{margin-top:8px}
+.hdr .actions button{padding:6px 16px;background:rgba(255,255,255,0.2);color:#fff;border:1px solid rgba(255,255,255,0.4);border-radius:4px;cursor:pointer;font-size:12px;margin-right:8px}
+.hdr .actions button:hover{background:rgba(255,255,255,0.35)}
 .wrap{max-width:1400px;margin:0 auto;padding:24px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:14px;margin-bottom:24px}
 .cd{background:#fff;border-radius:8px;padding:14px 18px;box-shadow:0 1px 3px rgba(0,0,0,.08);text-align:center}
@@ -798,12 +846,46 @@ table.st th{background:#fafafa;font-weight:600;color:#666}
 table.st th:first-child,table.st td:first-child{text-align:left}
 table.st tr:hover{background:#f5f5ff}
 .stit{font-size:16px;font-weight:600;color:#333;margin:24px 0 14px;padding-left:10px;border-left:3px solid #667eea}
+.tr-bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 18px}
+.tr-bar label{font-weight:600;font-size:13px;color:#555}
+.tr-bar input[type="text"]{padding:6px 10px;border:1px solid #d9d9d9;border-radius:4px;font-size:12px;width:175px;font-family:monospace;cursor:pointer;background:#fff}
+.tr-bar .btn{padding:6px 16px;border:none;border-radius:4px;font-size:13px;cursor:pointer}
+.tr-bar .btn-primary{background:#667eea;color:#fff}
+.tr-bar .btn-primary:hover{background:#5a6fd6}
+.tr-bar .btn-danger{background:#f5222d;color:#fff}
+.tr-bar .btn-danger:hover{background:#d91a25}
+.tr-bar .hint{color:#999;font-size:11px}
+#floatReset{display:none;position:fixed;top:16px;right:24px;z-index:9999;padding:8px 20px;
+  background:#f5222d;color:#fff;border:none;border-radius:6px;font-size:13px;cursor:pointer;
+  box-shadow:0 2px 8px rgba(245,34,45,0.3);transition:opacity .2s}
+#floatReset:hover{background:#d91a25}
+.tp-overlay{position:fixed;inset:0;z-index:9998}
+.tp-popup{position:fixed;z-index:9999;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.18);padding:16px 12px;min-width:260px;width:auto}
+.tp-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.tp-title{font-size:14px;color:#333;font-weight:600}
+.tp-cols-tp{display:flex;justify-content:center;gap:6px}
+.tp-col-wrap{flex:1}
+.tp-col-label{text-align:center;font-size:11px;color:#999;margin-bottom:4px;font-weight:600}
+.tp-col{height:216px;overflow-y:auto;border:1px solid #eee;border-radius:8px;background:#fafafa}
+.tp-col::-webkit-scrollbar{width:3px}
+.tp-col::-webkit-scrollbar-thumb{background:#ddd;border-radius:2px}
+.tp-item{height:36px;line-height:36px;text-align:center;cursor:pointer;font-size:15px;font-family:monospace;transition:background .12s,color .12s;border-radius:4px;margin:0 2px}
+.tp-item:hover{background:#eef0ff}
+.tp-item.sel{background:#667eea;color:#fff;font-weight:600}
+.tp-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+.tp-btn{padding:6px 16px;border:none;border-radius:6px;font-size:13px;cursor:pointer;font-weight:500}
+.tp-cancel{background:#f5f5f5;color:#666}
+.tp-cancel:hover{background:#e8e8e8}
+.tp-ok{background:#667eea;color:#fff}
+.tp-ok:hover{background:#5a6fd6}
 </style>
 </head>
 <body>
+<button id="floatReset">恢复全量</button>
 <div class="hdr">
   <h1>{{.Title}}</h1>
   <div class="meta">Report ID: {{.ReportID}} &nbsp;|&nbsp; {{.StartTime}} — {{.EndTime}} &nbsp;|&nbsp; Generated: {{.CreatedAt}}</div>
+  <div class="actions"><button onclick="downloadHTML()">&#x2B07; 下载报告</button></div>
 </div>
 <div class="wrap">
   <div class="cards">
@@ -826,6 +908,17 @@ table.st tr:hover{background:#f5f5ff}
   </div>
   {{end}}
 
+  <div class="bx tr-bar" id="trBar">
+    <label>时间范围：</label>
+    <input id="trFrom" type="text" readonly placeholder="开始时间">
+    <span style="color:#999">—</span>
+    <input id="trTo" type="text" readonly placeholder="结束时间">
+    <button id="trApply" class="btn btn-primary">应用</button>
+    <button id="trReset" class="btn btn-danger" style="display:none">恢复全量</button>
+    <span class="hint">可直接在图表上拖动框选时间范围</span>
+    <button id="modeToggle" class="btn" style="background:#52c41a;color:#fff" onclick="toggleTimeMode()">经过时间</button>
+  </div>
+
   <div class="bx" style="display:flex;align-items:center;gap:12px;padding:10px 18px">
     <label style="font-weight:600;font-size:13px;color:#555">选择 Case：</label>
     <select id="caseFilter" style="padding:6px 12px;border:1px solid #d9d9d9;border-radius:4px;font-size:13px;min-width:200px;cursor:pointer">
@@ -838,13 +931,13 @@ table.st tr:hover{background:#f5f5ff}
   <div class="bx"><div class="ct" id="c_online_users"></div></div>
   {{end}}
 
-  <div class="stit">QPS 时间曲线 (点击图例切换显示)</div>
+  <div class="stit">QPS 时间曲线 (点击图例切换显示；多 Case 差异大时自动切换对数轴)</div>
   <div class="bx"><div class="ct" id="c_qps"></div></div>
 
-  <div class="stit">延迟方差 (ms²，点击图例切换显示)</div>
+  <div class="stit">延迟方差 (ms²，点击图例切换显示；多 Case 差异大时自动切换对数轴)</div>
   <div class="bx"><div class="ct" id="c_lat"></div></div>
 
-  <div class="stit">成功 / 失败趋势</div>
+  <div class="stit">成功 / 失败趋势 (多 Case 差异大时自动切换对数轴)</div>
   <div class="bx"><div class="ct" id="c_sf"></div></div>
 
   <div class="stit">错误码分布</div>
@@ -872,93 +965,406 @@ table.st tr:hover{background:#f5f5ff}
 
 <script>
 (function(){
+// ===== Data =====
 var D={{.ChartDataJSON}};
 var EC={{.ErrorCodesJSON}};
+var OU={{.OnlineUsersJSON}};
+var M={{.MetricsJSON}};
+if(!M)M=[];
 var C=['#5470c6','#91cc75','#fac858','#ee6666','#73c0de','#3ba272','#fc8452','#9a60b4','#ea7ccc'];
 var charts={};
+var legendState={};
+var maxPts=1000;
+var timeMode='wall';
+var reportStartEpoch=D.startEpoch||0;
+function pd(n){return n<10?'0'+n:''+n;}
+function parseLabel(dt){var p=dt.split(' ');var d=p[0].split('-');var t=p[1].split(':');return new Date(+d[0],+d[1]-1,+d[2],+t[0],+t[1],+t[2]);}
+var isCrossDay=(function(){var tl=D.timeLabels;if(!tl||tl.length<2)return false;return tl[0].slice(0,10)!==tl[tl.length-1].slice(0,10);})();
+function wallLabel(dt){if(!dt||dt.indexOf(' ')<0)return dt;var p=dt.split(' ');return isCrossDay?(p[0].slice(5)+' '+p[1]):p[1];}
+function elapsedLabel(dt){if(!dt||!reportStartEpoch)return wallLabel(dt);var ms=parseLabel(dt)-reportStartEpoch*1000;if(ms<0)ms=0;var tot=Math.round(ms/1000),s=tot%60,m=Math.floor(tot/60)%60,h=Math.floor(tot/3600);return '+'+pd(h)+':'+pd(m)+':'+pd(s);}
+function displayLabels(tl){if(!tl||!tl.length)return tl;return tl.map(timeMode==='elapsed'?elapsedLabel:wallLabel);}
+window.toggleTimeMode=function(){timeMode=(timeMode==='wall')?'elapsed':'wall';var btn=document.getElementById('modeToggle');if(btn)btn.textContent=timeMode==='wall'?'\u7ecf\u8fc7\u65f6\u95f4':'\u5899\u4e0a\u65f6\u95f4';renderAll();};
 
+// ===== Download =====
+window.downloadHTML=function(){
+  var html='<!DOCTYPE html>\n'+document.documentElement.outerHTML;
+  var blob=new Blob([html],{type:'text/html;charset=utf-8'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=(document.title||'report')+'.html';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+};
+
+// ===== Time Range State =====
+var globalFrom=null,globalTo=null;
+var hasTimeFilter=false;
+
+// ----- URL params -----
+function readUrlParams(){
+  try{
+    var p=new URLSearchParams(window.location.search);
+    var f=p.get('from'),t=p.get('to');
+    if(f)globalFrom=f;
+    if(t)globalTo=t;
+  }catch(e){}
+}
+function writeUrlParams(){
+  try{
+    var p=new URLSearchParams(window.location.search);
+    if(globalFrom)p.set('from',globalFrom);else p.delete('from');
+    if(globalTo)p.set('to',globalTo);else p.delete('to');
+    var qs=p.toString();
+    var url=window.location.pathname+(qs?'?'+qs:'');
+    window.history.replaceState(null,'',url);
+  }catch(e){}
+}
+
+// ===== Downsample helpers (JS side) =====
+function dsArray(arr,bs){
+  var out=[];
+  for(var i=0;i<arr.length;i+=bs){
+    var e=Math.min(i+bs,arr.length),sum=0,cnt=0;
+    for(var j=i;j<e;j++){
+      if(arr[j]!==null&&arr[j]!==undefined){sum+=arr[j];cnt++;}
+    }
+    out.push(cnt>0?sum/cnt:null);
+  }
+  return out;
+}
+function dsLabels(labels,bs){
+  var out=[];
+  for(var i=0;i<labels.length;i+=bs){
+    var e=Math.min(i+bs,labels.length);
+    out.push(labels[e-1]);
+  }
+  return out;
+}
+function dsChartData(cd){
+  var n=cd.timeLabels.length;
+  if(n<=maxPts)return cd;
+  var bs=Math.ceil(n/maxPts);
+  var newTl=dsLabels(cd.timeLabels,bs);
+  var newSeries=cd.series.map(function(s){
+    return {name:s.name,minTime:s.minTime,maxTime:s.maxTime,
+      qps:dsArray(s.qps,bs),success:dsArray(s.success,bs),
+      failed:dsArray(s.failed,bs),avgMs:dsArray(s.avgMs,bs),
+      varianceMs:dsArray(s.varianceMs,bs),errors:s.errors};
+  });
+  return {timeLabels:newTl,series:newSeries};
+}
+function dsOU(cd){
+  if(!cd||!cd.series)return cd;
+  var n=cd.timeLabels.length;
+  if(n<=maxPts)return cd;
+  var bs=Math.ceil(n/maxPts);
+  var newTl=dsLabels(cd.timeLabels,bs);
+  return {timeLabels:newTl,series:cd.series.map(function(s){
+    return {name:s.name,values:dsArray(s.values,bs)};
+  })};
+}
+function dsMetric(m){
+  if(!m||m.times.length<=maxPts)return m;
+  var bs=Math.ceil(m.times.length/maxPts);
+  var newT=dsLabels(m.times,bs);
+  return {name:m.name,caseGroup:m.caseGroup,agentGroup:m.agentGroup,labels:m.labels,
+    times:newT,values:dsArray(m.values,bs)};
+}
+
+// ----- Filter helpers -----
+function filterChartData(src,from,to){
+  if(!from&&!to)return dsChartData(src);
+  var idxs=[];
+  src.timeLabels.forEach(function(t,i){if((!from||t>=from)&&(!to||t<=to))idxs.push(i);});
+  if(idxs.length===0)return {timeLabels:[],series:src.series.map(function(s){return {name:s.name,minTime:s.minTime,maxTime:s.maxTime,qps:[],success:[],failed:[],avgMs:[],varianceMs:[],errors:s.errors};})};
+  if(idxs.length===src.timeLabels.length)return dsChartData(src);
+  var filtered={
+    timeLabels:idxs.map(function(i){return src.timeLabels[i];}),
+    series:src.series.map(function(s){return {
+      name:s.name,minTime:s.minTime,maxTime:s.maxTime,
+      qps:idxs.map(function(i){return s.qps[i];}),
+      success:idxs.map(function(i){return s.success[i];}),
+      failed:idxs.map(function(i){return s.failed[i];}),
+      avgMs:idxs.map(function(i){return s.avgMs[i];}),
+      varianceMs:idxs.map(function(i){return s.varianceMs[i];}),
+      errors:s.errors};})
+  };
+  return dsChartData(filtered);
+}
+function filterOU(src,from,to){
+  if(!src||!src.series)return src;
+  if(!from&&!to)return dsOU(src);
+  var idxs=[];
+  src.timeLabels.forEach(function(t,i){if((!from||t>=from)&&(!to||t<=to))idxs.push(i);});
+  if(idxs.length===src.timeLabels.length)return dsOU(src);
+  var filtered={
+    timeLabels:idxs.map(function(i){return src.timeLabels[i];}),
+    series:src.series.map(function(s){return {name:s.name,values:idxs.map(function(i){return s.values[i];})};})
+  };
+  return dsOU(filtered);
+}
+function filterMetrics(src,from,to){
+  if(!src)return src;
+  return src.map(function(m){
+    var fm=m;
+    if(from||to){
+      var idxs=[];
+      m.times.forEach(function(t,i){if((!from||t>=from)&&(!to||t<=to))idxs.push(i);});
+      fm={name:m.name,caseGroup:m.caseGroup,agentGroup:m.agentGroup,labels:m.labels,
+        times:idxs.map(function(i){return m.times[i];}),values:idxs.map(function(i){return m.values[i];})};
+    }
+    return dsMetric(fm);
+  });
+}
+
+// Mask: series with no non-zero data -> all null (issue #6: no zero points when no data).
+// Series with data -> null outside active range.
+function mask(data){
+  var first=-1,last=-1;
+  for(var i=0;i<data.length;i++){
+    if(data[i]!==null&&data[i]!==0&&data[i]!==undefined){
+      if(first<0)first=i;
+      last=i;
+    }
+  }
+  if(first<0)return data.map(function(){return null;});
+  if(first===0&&last===data.length-1)return data;
+  return data.map(function(v,i){return(i<first||i>last)?null:v;});
+}
+
+// Count non-null non-zero values
+function nnz(d){var c=0;for(var i=0;i<d.length;i++)if(d[i]!==null&&d[i]!==0&&d[i]!==undefined)c++;return c;}
+
+// Check if multi-series data needs log scale
+function needLogAxis(seriesArr){
+  var maxAvg=0,minAvg=Infinity,valid=0;
+  seriesArr.forEach(function(data){
+    var sum=0,cnt=0;
+    data.forEach(function(v){if(v!==null&&v>0){sum+=v;cnt++;}});
+    if(cnt>0){valid++;var a=sum/cnt;if(a>maxAvg)maxAvg=a;if(a<minAvg)minAvg=a;}
+  });
+  return valid>=2&&minAvg>0&&maxAvg/minAvg>20;
+}
+
+// Build series option with adaptive symbol size
+function seriesOpt(name,data,color,extra){
+  var nn=nnz(data);
+  var symSize=nn<=3?14:nn<=10?10:nn<=30?6:3;
+  var o={name:name,type:'line',smooth:nn>5,symbol:'circle',symbolSize:symSize,
+    showSymbol:true,data:data,itemStyle:{color:color},emphasis:{focus:'series'},connectNulls:false};
+  if(extra)for(var k in extra)o[k]=extra[k];
+  return o;
+}
+
+// ----- Chart helpers -----
+function saveLegend(id){
+  var c=charts[id];
+  if(c){
+    try{var opt=c.getOption();if(opt&&opt.legend&&opt.legend[0]&&opt.legend[0].selected)legendState[id]=opt.legend[0].selected;}catch(e){}
+  }
+}
 function mk(id,opt){
   var d=document.getElementById(id);if(!d)return null;
+  saveLegend(id);
   if(charts[id]){charts[id].dispose();}
+  if(legendState[id]&&opt.legend){opt.legend.selected=legendState[id];}
   var c=echarts.init(d);c.setOption(opt);
   window.addEventListener('resize',function(){c.resize();});
   charts[id]=c;
   return c;
 }
 
-// 初始化 Case 筛选下拉框
+function addBrush(chart,timeLabels){
+  if(!chart||!timeLabels||!timeLabels.length)return;
+  chart.setOption({toolbox:{show:false},brush:{xAxisIndex:0,brushType:'lineX',brushMode:'single',throttleType:'debounce',throttleDelay:300},xAxis:{boundaryGap:true,axisLabel:{showMaxLabel:true,showMinLabel:true}}});
+  chart.dispatchAction({type:'takeGlobalCursor',key:'brush',brushOption:{brushType:'lineX',brushMode:'single'}});
+  var lastAreas=null;
+  chart.on('brush',function(p){lastAreas=p.areas;});
+  chart.on('brushEnd',function(){
+    if(lastAreas&&lastAreas.length>0){
+      var a=lastAreas[0];
+      if(a.coordRange){
+        var rawS=Math.round(a.coordRange[0]);
+        var rawE=Math.round(a.coordRange[1]);
+        var s=Math.max(0,rawS);
+        var e=Math.min(timeLabels.length-1,rawE);
+        // Clamp: if drag extends past left edge use first label; past right use last
+        var fromT=(rawS<0)?timeLabels[0]:timeLabels[s];
+        var toT=(rawE>=timeLabels.length)?timeLabels[timeLabels.length-1]:timeLabels[e];
+        if(fromT<=toT)setTimeRange(fromT,toT);
+      }
+      lastAreas=null;
+    }
+  });
+}
+
+// ----- Float reset button & IntersectionObserver -----
+function initFloatReset(){
+  var trBar=document.getElementById('trBar');
+  var fb=document.getElementById('floatReset');
+  if(!trBar||!fb)return;
+  var isBarVisible=true;
+  function updateFloat(){
+    fb.style.display=(hasTimeFilter&&!isBarVisible)?'block':'none';
+  }
+  if(window.IntersectionObserver){
+    new IntersectionObserver(function(entries){
+      isBarVisible=entries[0].isIntersecting;
+      updateFloat();
+    },{threshold:0}).observe(trBar);
+  }else{
+    isBarVisible=false;
+  }
+  fb.addEventListener('click',function(){setTimeRange(null,null);});
+  window._updateFloat=updateFloat;
+}
+
+// ----- Time Range UI -----
+function setTimeRange(from,to){
+  globalFrom=from||null;
+  globalTo=to||null;
+  hasTimeFilter=!!(globalFrom||globalTo);
+  var fi=document.getElementById('trFrom'),ti=document.getElementById('trTo');
+  if(fi)fi.value=globalFrom||'';
+  if(ti)ti.value=globalTo||'';
+  writeUrlParams();
+  var rb=document.getElementById('trReset');
+  if(rb)rb.style.display=hasTimeFilter?'inline-block':'none';
+  if(window._updateFloat)window._updateFloat();
+  renderAll();
+}
+
+// Compute the active data time range for selected case(s)
+function caseDataRange(caseName){
+  if(!caseName)return {from:null,to:null};
+  var s=D.series.find(function(x){return x.name===caseName;});
+  if(!s)return {from:null,to:null};
+  // Find first/last nonzero in original full data
+  var first=-1,last=-1;
+  for(var i=0;i<s.qps.length;i++){
+    if(s.qps[i]>0||s.success[i]>0||s.failed[i]>0){
+      if(first<0)first=i;
+      last=i;
+    }
+  }
+  if(first<0)return {from:null,to:null};
+  return {from:D.timeLabels[first],to:D.timeLabels[last]};
+}
+
+// ----- Main render -----
+function renderAll(){
+  var cs=document.getElementById('caseFilter');
+  var caseName=cs?cs.value:'';
+  var cd=filterChartData(D,globalFrom,globalTo);
+  renderCharts(cd,caseName);
+  renderOnlineUsers();
+  renderMetrics();
+}
+
+// ----- Case filter -----
 var sel=document.getElementById('caseFilter');
 if(sel){
   D.series.forEach(function(s){
     var o=document.createElement('option');o.value=s.name;o.textContent=s.name;sel.appendChild(o);
   });
-  sel.addEventListener('change',function(){renderCharts(sel.value);});
-}
-
-function filterSeries(caseName){
-  if(!caseName)return D.series;
-  return D.series.filter(function(s){return s.name===caseName;});
-}
-
-function renderCharts(caseName){
-  var fs=filterSeries(caseName);
-
-  // ---- QPS 曲线 ----
-  var qS=[];
-  fs.forEach(function(s){
-    var i=D.series.indexOf(s);
-    qS.push({name:s.name,type:'line',smooth:true,symbol:'circle',symbolSize:3,data:s.qps,
-      itemStyle:{color:C[i%C.length]},emphasis:{focus:'series'}});
+  sel.addEventListener('change',function(){
+    // Issue #5: auto-zoom to case time range
+    var cn=sel.value;
+    if(cn){
+      var r=caseDataRange(cn);
+      if(r.from&&r.to){
+        globalFrom=r.from;globalTo=r.to;
+        hasTimeFilter=true;
+        var fi=document.getElementById('trFrom'),ti=document.getElementById('trTo');
+        if(fi)fi.value=globalFrom;
+        if(ti)ti.value=globalTo;
+        writeUrlParams();
+        var rb=document.getElementById('trReset');
+        if(rb)rb.style.display='inline-block';
+        if(window._updateFloat)window._updateFloat();
+      }
+    } else {
+      // Back to all: clear time filter
+      globalFrom=null;globalTo=null;
+      hasTimeFilter=false;
+      var fi=document.getElementById('trFrom'),ti=document.getElementById('trTo');
+      if(fi)fi.value='';
+      if(ti)ti.value='';
+      writeUrlParams();
+      var rb=document.getElementById('trReset');
+      if(rb)rb.style.display='none';
+      if(window._updateFloat)window._updateFloat();
+    }
+    renderAll();
   });
-  mk('c_qps',{
+}
+
+function renderCharts(cd,caseName){
+  var tl=cd.timeLabels;var xtl=displayLabels(tl);
+  var fs=caseName?cd.series.filter(function(s){return s.name===caseName;}):cd.series;
+
+  // ---- QPS ----
+  var qS=[],qData=[];
+  fs.forEach(function(s){
+    var gi=D.series.findIndex(function(x){return x.name===s.name;});if(gi<0)gi=0;
+    var d=mask(s.qps);
+    qData.push(d);
+    qS.push(seriesOpt(s.name,d,C[gi%C.length]));
+  });
+  var qLog=needLogAxis(qData);
+  var c1=mk('c_qps',{
     tooltip:{trigger:'axis'},
     legend:{data:fs.map(function(s){return s.name;}),top:0,type:'scroll',selectedMode:'multiple'},
     grid:{top:40,bottom:35,left:55,right:20},
-    xAxis:{type:'category',data:D.timeLabels,axisLabel:{rotate:30,fontSize:11}},
-    yAxis:{type:'value',name:'req/s'},
+    xAxis:{type:'category',data:xtl,boundaryGap:false,axisLabel:{rotate:30,fontSize:11}},
+    yAxis:qLog?{type:'log',name:'req/s (log)',min:1,logBase:10}:{type:'value',name:'req/s'},
     series:qS
   });
+  addBrush(c1,tl);
 
-  // ---- 延迟方差 ----
-  var lS=[];
+  // ---- Variance ----
+  var lS=[],lData=[];
   fs.forEach(function(s){
-    var i=D.series.indexOf(s);
-    lS.push({name:s.name,type:'line',smooth:true,data:s.varianceMs,lineStyle:{width:1.5},itemStyle:{color:C[i%C.length]},emphasis:{focus:'series'}});
+    var gi=D.series.findIndex(function(x){return x.name===s.name;});if(gi<0)gi=0;
+    var d=mask(s.varianceMs);
+    lData.push(d);
+    lS.push(seriesOpt(s.name,d,C[gi%C.length],{lineStyle:{width:1.5}}));
   });
-  mk('c_lat',{
+  var lLog=needLogAxis(lData);
+  var c2=mk('c_lat',{
     tooltip:{trigger:'axis'},
     legend:{data:lS.map(function(s){return s.name;}),top:0,type:'scroll',selectedMode:'multiple'},
     grid:{top:45,bottom:35,left:55,right:20},
-    xAxis:{type:'category',data:D.timeLabels,axisLabel:{rotate:30,fontSize:11}},
-    yAxis:{type:'value',name:'ms²'},
+    xAxis:{type:'category',data:xtl,boundaryGap:false,axisLabel:{rotate:30,fontSize:11}},
+    yAxis:lLog?{type:'log',name:'ms\u00b2 (log)',min:1,logBase:10}:{type:'value',name:'ms\u00b2'},
     series:lS
   });
+  addBrush(c2,tl);
 
-  // ---- 成功 / 失败趋势 ----
-  var sfS=[];
+  // ---- Success / Failed ----
+  var sfS=[],sfData=[];
   fs.forEach(function(s){
-    var i=D.series.indexOf(s);
-    sfS.push({name:s.name+' 成功',type:'line',smooth:true,areaStyle:{opacity:.2},data:s.success,
-      itemStyle:{color:C[i%C.length]},emphasis:{focus:'series'}});
-    sfS.push({name:s.name+' 失败',type:'line',smooth:true,lineStyle:{type:'dashed'},data:s.failed,
-      itemStyle:{color:C[(i+3)%C.length]},emphasis:{focus:'series'}});
+    var gi=D.series.findIndex(function(x){return x.name===s.name;});if(gi<0)gi=0;
+    var ds=mask(s.success),df=mask(s.failed);
+    sfData.push(ds);sfData.push(df);
+    sfS.push(seriesOpt(s.name+' \u6210\u529f',ds,C[gi%C.length],{areaStyle:{opacity:.2}}));
+    sfS.push(seriesOpt(s.name+' \u5931\u8d25',df,C[(gi+3)%C.length],{lineStyle:{type:'dashed'}}));
   });
-  mk('c_sf',{
+  var sfLog=needLogAxis(sfData);
+  var c3=mk('c_sf',{
     tooltip:{trigger:'axis'},
     legend:{data:sfS.map(function(s){return s.name;}),top:0,type:'scroll',selectedMode:'multiple'},
     grid:{top:40,bottom:35,left:55,right:20},
-    xAxis:{type:'category',data:D.timeLabels,axisLabel:{rotate:30,fontSize:11}},
-    yAxis:{type:'value'},
+    xAxis:{type:'category',data:xtl,boundaryGap:false,axisLabel:{rotate:30,fontSize:11}},
+    yAxis:sfLog?{type:'log',name:'(log)',min:1,logBase:10}:{type:'value'},
     series:sfS
   });
+  addBrush(c3,tl);
 
-  // ---- 错误码饼图 ----
+  // ---- Error Pie ----
   var errData;
-  if(!caseName){
-    errData=EC;
-  }else{
-    errData=[];
-    fs.forEach(function(s){if(s.errors){errData=errData.concat(s.errors);}});
+  if(!caseName){errData=EC;}else{
+    errData=[];fs.forEach(function(s){if(s.errors)errData=errData.concat(s.errors);});
   }
   mk('c_err',{
     tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)'},
@@ -966,28 +1372,27 @@ function renderCharts(caseName){
   });
 }
 
-renderCharts('');
-
 // ---- Online Users ----
-var OU={{.OnlineUsersJSON}};
-if(OU&&OU.series&&OU.series.length>0){
-  var ouS=OU.series.map(function(s,i){
-    return {name:s.name,type:'line',smooth:true,symbol:'circle',symbolSize:3,data:s.values,
+function renderOnlineUsers(){
+  if(!OU||!OU.series||OU.series.length===0)return;
+  var d=filterOU(OU,globalFrom,globalTo);
+  var tl=d.timeLabels;var xtl=displayLabels(tl);
+  var ouS=d.series.map(function(s,i){
+    return {name:s.name,type:'line',smooth:true,symbol:'circle',symbolSize:3,showSymbol:true,data:s.values,
       itemStyle:{color:C[i%C.length]},emphasis:{focus:'series'}};
   });
-  mk('c_online_users',{
+  var c=mk('c_online_users',{
     tooltip:{trigger:'axis'},
-    legend:{data:OU.series.map(function(s){return s.name;}),top:0,type:'scroll',selectedMode:'multiple'},
+    legend:{data:d.series.map(function(s){return s.name;}),top:0,type:'scroll',selectedMode:'multiple'},
     grid:{top:40,bottom:35,left:55,right:20},
-    xAxis:{type:'category',data:OU.timeLabels,axisLabel:{rotate:30,fontSize:11}},
+    xAxis:{type:'category',data:xtl,boundaryGap:false,axisLabel:{rotate:30,fontSize:11}},
     yAxis:{type:'value',name:'users'},
     series:ouS
   });
+  addBrush(c,tl);
 }
 
-// ---- Metrics (dynamic) ----
-var M={{.MetricsJSON}};
-if(!M)M=[];
+// ---- Metrics ----
 (function(){
   var metSel=document.getElementById('metricFilter');
   var caseSel=document.getElementById('metricCaseFilter');
@@ -1007,7 +1412,6 @@ if(!M)M=[];
     if(caseSel)caseSel.addEventListener('change',onFilter);
     if(agentSel)agentSel.addEventListener('change',onFilter);
   }
-  renderMetrics();
 })();
 
 function renderMetrics(){
@@ -1015,18 +1419,18 @@ function renderMetrics(){
   var fn=document.getElementById('metricFilter');fn=fn?fn.value:'';
   var fc=document.getElementById('metricCaseFilter');fc=fc?fc.value:'';
   var fa=document.getElementById('metricAgentFilter');fa=fa?fa.value:'';
-  // dispose old
   Object.keys(charts).forEach(function(id){if(id.indexOf('c_mx')===0){charts[id].dispose();delete charts[id];}});
   mc.innerHTML='';
-  var fs=M.filter(function(m){
+  var mf=filterMetrics(M,globalFrom,globalTo);
+  var fms=mf.filter(function(m){
     if(fn&&m.name!==fn)return false;
     if(fc&&m.caseGroup!==fc)return false;
     if(fa&&m.agentGroup!==fa)return false;
     return true;
   });
-  if(!fs.length){mc.innerHTML='<div class="empty"><div class="icon">&#x1F4CA;</div><div>No metrics.</div></div>';return;}
+  if(!fms.length){mc.innerHTML='<div style="text-align:center;padding:40px;color:#999">No metrics.</div>';return;}
   var prevGroup='\x00';
-  fs.forEach(function(m,i){
+  fms.forEach(function(m,i){
     var grpKey=(m.caseGroup||'')+'|'+(m.agentGroup||'');
     if(grpKey!==prevGroup){
       prevGroup=grpKey;
@@ -1046,16 +1450,112 @@ function renderMetrics(){
     var ct=document.createElement('div');ct.className='ct';ct.id=id;
     bx.appendChild(h3);bx.appendChild(ct);mc.appendChild(bx);
     (function(cid,cm){
-      mk(cid,{
+      var c=mk(cid,{
         tooltip:{trigger:'axis'},
         grid:{top:20,bottom:35,left:55,right:20},
-        xAxis:{type:'category',data:cm.times,axisLabel:{rotate:30,fontSize:11}},
+        xAxis:{type:'category',data:displayLabels(cm.times),boundaryGap:false,axisLabel:{rotate:30,fontSize:11}},
         yAxis:{type:'value'},
-        series:[{data:cm.values,type:'line',smooth:true,name:cm.name,areaStyle:{opacity:.12}}]
+        series:[{data:cm.values,type:'line',smooth:true,name:cm.name,showSymbol:true,symbol:'circle',symbolSize:3,areaStyle:{opacity:.12}}]
       });
+      addBrush(c,cm.times);
     })(id,m);
   });
 }
+
+// ===== Init =====
+readUrlParams();
+hasTimeFilter=!!(globalFrom||globalTo);
+var trFrom=document.getElementById('trFrom'),trTo=document.getElementById('trTo');
+var trApply=document.getElementById('trApply'),trReset=document.getElementById('trReset');
+if(trFrom&&globalFrom)trFrom.value=globalFrom;
+if(trTo&&globalTo)trTo.value=globalTo;
+if(trReset)trReset.style.display=hasTimeFilter?'inline-block':'none';
+if(trApply)trApply.addEventListener('click',function(){
+  setTimeRange(trFrom.value||null,trTo.value||null);
+});
+if(trReset)trReset.addEventListener('click',function(){setTimeRange(null,null);});
+var activeTP=null;
+var uniqueDates=(function(){var seen={},a=[];(D.timeLabels||[]).forEach(function(t){var d=t.slice(0,10);if(!seen[d]){seen[d]=true;a.push(d);}});return a;})();
+function TimePicker(inp){
+var self=this;self.popup=null;self.overlay=null;
+self.date=uniqueDates.length?uniqueDates[0]:'';
+self.h=0;self.m=0;self.s=0;
+self.hCol=null;self.mCol=null;self.sCol=null;self.dCol=null;
+function buildCol(items,selIdx,onChange){
+  var col=document.createElement('div');col.className='tp-col';
+  items.forEach(function(txt,i){
+    var d=document.createElement('div');d.className='tp-item'+(i===selIdx?' sel':'');
+    d.textContent=txt;
+    d.addEventListener('click',function(){
+      col.querySelectorAll('.tp-item').forEach(function(el){el.classList.remove('sel');});
+      d.classList.add('sel');onChange(i);
+    });
+    col.appendChild(d);
+  });
+  return col;
+}
+function numItems(cnt){var a=[];for(var i=0;i<cnt;i++)a.push(pd(i));return a;}
+function scrollTo(col,idx){setTimeout(function(){col.scrollTop=idx*36-col.clientHeight/2+18;},0);}
+self.close=function(){
+  if(self.popup&&self.popup.parentNode)self.popup.parentNode.removeChild(self.popup);
+  if(self.overlay&&self.overlay.parentNode)self.overlay.parentNode.removeChild(self.overlay);
+  self.popup=null;self.overlay=null;if(activeTP===self)activeTP=null;
+};
+self.open=function(){
+  if(activeTP&&activeTP!==self)activeTP.close();
+  if(self.popup){self.close();return;}
+  activeTP=self;
+  var val=inp.value;
+  var m1=val&&val.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
+  if(m1){self.date=m1[1];self.h=+m1[2];self.m=+m1[3];self.s=+m1[4];}
+  if(!self.date&&uniqueDates.length)self.date=uniqueDates[0];
+  var dateIdx=Math.max(0,uniqueDates.indexOf(self.date));
+  self.overlay=document.createElement('div');self.overlay.className='tp-overlay';
+  self.overlay.addEventListener('click',function(){self.close();});
+  document.body.appendChild(self.overlay);
+  self.popup=document.createElement('div');self.popup.className='tp-popup';
+  self.popup.style.width=isCrossDay?'310px':'265px';
+  self.popup.addEventListener('click',function(e){e.stopPropagation();});
+  var hdr=document.createElement('div');hdr.className='tp-hdr';
+  var title=document.createElement('div');title.className='tp-title';title.textContent='\u9009\u62e9\u65f6\u95f4';
+  hdr.appendChild(title);self.popup.appendChild(hdr);
+  var cols=document.createElement('div');cols.className='tp-cols-tp';
+  function makeWrap(label,col){var wrap=document.createElement('div');wrap.className='tp-col-wrap';var lb=document.createElement('div');lb.className='tp-col-label';lb.textContent=label;wrap.appendChild(lb);wrap.appendChild(col);return wrap;}
+  if(isCrossDay){
+    var dc=buildCol(uniqueDates.map(function(d){return d.slice(5);}),dateIdx,function(i){self.date=uniqueDates[i];});
+    self.dCol=dc;cols.appendChild(makeWrap('\u65e5\u671f',dc));
+  }
+  var hc=buildCol(numItems(24),self.h,function(i){self.h=i;});self.hCol=hc;
+  var mc=buildCol(numItems(60),self.m,function(i){self.m=i;});self.mCol=mc;
+  var sc=buildCol(numItems(60),self.s,function(i){self.s=i;});self.sCol=sc;
+  cols.appendChild(makeWrap('\u65f6',hc));cols.appendChild(makeWrap('\u5206',mc));cols.appendChild(makeWrap('\u79d2',sc));
+  self.popup.appendChild(cols);
+  var actions=document.createElement('div');actions.className='tp-actions';
+  var cb=document.createElement('button');cb.className='tp-btn tp-cancel';cb.textContent='\u53d6\u6d88';
+  cb.addEventListener('click',function(){self.close();});
+  var ob=document.createElement('button');ob.className='tp-btn tp-ok';ob.textContent='\u786e\u5b9a';
+  ob.addEventListener('click',function(){
+    inp.value=self.date+' '+pd(self.h)+':'+pd(self.m)+':'+pd(self.s);
+    self.close();
+    if(trFrom&&trTo&&trFrom.value&&trTo.value)setTimeRange(trFrom.value,trTo.value);
+  });
+  actions.appendChild(cb);actions.appendChild(ob);self.popup.appendChild(actions);
+  var rect=inp.getBoundingClientRect();
+  var popH=300;
+  var top=rect.bottom+4;if(top+popH>window.innerHeight)top=rect.top-popH;
+  self.popup.style.left=Math.max(8,rect.left)+'px';
+  self.popup.style.top=Math.max(8,top)+'px';
+  document.body.appendChild(self.popup);
+  if(isCrossDay&&self.dCol)scrollTo(self.dCol,dateIdx);
+  scrollTo(self.hCol,self.h);scrollTo(self.mCol,self.m);scrollTo(self.sCol,self.s);
+};
+inp.addEventListener('click',function(e){e.stopPropagation();self.open();});
+}
+if(trFrom)new TimePicker(trFrom);
+if(trTo)new TimePicker(trTo);
+
+initFloatReset();
+renderAll();
 })();
 </script>
 </body>

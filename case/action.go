@@ -13,12 +13,13 @@ type CaseFunc func(*TaskActionCase, *user.UserHolder, []string) error
 
 type TaskActionCase struct {
 	base.TaskActionBase
-	Fn          CaseFunc
-	logHandler  func(openId string, format string, a ...any)
-	UserHolder  *user.UserHolder
-	TracerEntry report.TracingEntry
-	Args        []string
-	NeedLog     bool
+	Fn           CaseFunc
+	logHandler   func(openId string, format string, a ...any)
+	UserHolder   *user.UserHolder
+	TracerEntry  report.TracingEntry
+	DispatchedAt time.Time // 记录任务分发时间，用于计算延迟
+	Args         []string
+	NeedLog      bool
 }
 
 func (t *TaskActionCase) HookRun() error {

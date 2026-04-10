@@ -439,15 +439,15 @@ func (m *Master) deleteReport(id string) error {
 	m.redis.ZRem(ctx, "report:index", id)
 	m.redis.HDel(ctx, "task:history", id)
 
-	// 删除本地文件目录（防路径穿越）
+	// 删除本地 HTML 文件（防路径穿越）
 	if m.cfg.ReportDir != "" {
-		dir := filepath.Join(m.cfg.ReportDir, id)
-		absDir, err1 := filepath.Abs(dir)
+		htmlFile := filepath.Join(m.cfg.ReportDir, id+".html")
+		absFile, err1 := filepath.Abs(htmlFile)
 		absBase, err2 := filepath.Abs(m.cfg.ReportDir)
 		if err1 == nil && err2 == nil &&
-			strings.HasPrefix(absDir, absBase+string(filepath.Separator)) {
-			if err := os.RemoveAll(absDir); err != nil {
-				log.Printf("[Master] Delete report dir %s: %v", absDir, err)
+			strings.HasPrefix(absFile, absBase+string(filepath.Separator)) {
+			if err := os.Remove(absFile); err != nil && !os.IsNotExist(err) {
+				log.Printf("[Master] Delete report file %s: %v", absFile, err)
 			}
 		}
 	}
@@ -753,7 +753,7 @@ func (m *Master) handleTaskHistory(w http.ResponseWriter, _ *http.Request) {
 
 func (m *Master) handleViewReport(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	htmlPath := filepath.Join(m.cfg.ReportDir, id, "html")
+	htmlPath := filepath.Join(m.cfg.ReportDir, id+".html")
 	data, err := os.ReadFile(htmlPath)
 	if err != nil {
 		// 尝试实时生成

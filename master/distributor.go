@@ -324,9 +324,7 @@ func (m *Master) aggregateAndGenerate(reportID string) error {
 		data.Meta.RawDataSize += int64(len(mb))
 	}
 
-	// 写入到本地 JSON 备份（展开的指标，不写入原始打点以减小磁盘占用）
-	outDir := filepath.Join(m.cfg.ReportDir, reportID)
-	htmlPath := filepath.Join(outDir, "html")
+	htmlPath := filepath.Join(m.cfg.ReportDir, reportID+".html")
 	// 使用上一次生成的 HTML 文件大小作为初始 ReportSize 估值
 	if fi, statErr := os.Stat(htmlPath); statErr == nil {
 		data.Meta.ReportSize = fi.Size()
@@ -335,13 +333,9 @@ func (m *Master) aggregateAndGenerate(reportID string) error {
 	redisWriter := report_impl.NewRedisReportWriter(m.redis, "master")
 	_ = redisWriter.WriteMeta(&data.Meta)
 
-	_ = os.MkdirAll(outDir, 0750)
-	localWriter := report_impl.NewJSONFileWriter(m.cfg.ReportDir)
-	_ = localWriter.WriteMeta(&data.Meta)
-	_ = localWriter.WriteTracings(reportID, data.Tracings)
-	_ = localWriter.WriteMetrics(reportID, data.Metrics)
+	_ = os.MkdirAll(m.cfg.ReportDir, 0750)
 
-	// 生成 HTML
+	// 生成 HTML（数据内嵌，不再写单独 JSON 文件）
 	if err := m.gen.GenerateToFile(data, htmlPath); err != nil {
 		return fmt.Errorf("generate html: %w", err)
 	}
@@ -349,7 +343,6 @@ func (m *Master) aggregateAndGenerate(reportID string) error {
 	// 生成完毕后更新实际报告大小，并回写 meta
 	if fi, statErr := os.Stat(htmlPath); statErr == nil {
 		data.Meta.ReportSize = fi.Size()
-		_ = localWriter.WriteMeta(&data.Meta)
 		_ = redisWriter.WriteMeta(&data.Meta)
 	}
 

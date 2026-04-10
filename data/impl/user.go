@@ -85,7 +85,7 @@ func CreateUser(openId string, logHandler func(format string, a ...any),
 	var bufferWriter *log.LogBufferedRotatingWriter
 	if enableActorLog {
 		bufferWriter, _ = log.NewLogBufferedRotatingWriter(nil,
-			fmt.Sprintf("../log/actor/%s.%%N.log", openId), "", 20*1024*1024, 3, time.Second*3, 0)
+			fmt.Sprintf("../log/actor/%s.%%N.log", openId), "", 20*1024*1024, 3, time.Second*3, 128)
 	}
 	c, err := connectFn()
 	if err != nil {
