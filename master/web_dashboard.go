@@ -231,11 +231,9 @@ border-radius:4px;padding:4px 8px;color:var(--text);font-size:12px}
     <h3>Submit Stress Test Task</h3>
     <div class="form-group">
       <label>Case File Content <span style="font-size:11px;color:var(--accent)">(drag &amp; drop a .conf file here)</span></label>
-      <textarea id="taskContent" class="drop-zone" placeholder="#!stress
-# caseName  errorBreak  prefix  start  end  batch  qps  runTime
-login_bench false       test_   1      1001 50     50   60">#!stress
+      <label> case_name error_break openid_prefix id_begin id_end target_qps user_batch_count run_time [args...] [&] </label>
+      <textarea id="taskContent" class="drop-zone" placeholder="">
 </textarea>
-      <div class="form-hint">First line must be <code>#!stress</code>. Each subsequent line defines a stress case.</div>
     </div>
     <div class="form-row">
       <div class="form-group">

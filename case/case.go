@@ -17,6 +17,7 @@ import (
 	base "github.com/atframework/robot-go/base"
 	user_data "github.com/atframework/robot-go/data"
 	report "github.com/atframework/robot-go/report"
+	report_impl "github.com/atframework/robot-go/report/impl"
 	utils "github.com/atframework/robot-go/utils"
 )
 
@@ -114,7 +115,7 @@ func RunCaseFileStandAlone(caseFile string, repeatedTime int32) error {
 		return err
 	}
 
-	lines, err := ParseCaseFileContent(string(content), CaseFileModeStandalone)
+	lines, err := ParseCaseFileContent(string(content))
 	if err != nil {
 		return err
 	}
@@ -132,14 +133,15 @@ func RunCaseFileStandAlone(caseFile string, repeatedTime int32) error {
 				continue
 			}
 
+			pressure := report_impl.NewMemoryPressureController()
 			params := line.Stress
 			waitingChan := make(chan string, 1)
 			go func(p Params) {
-				waitingChan <- RunCaseInner(context.Background(), p, nil, nil, true, true)
+				waitingChan <- RunCaseInner(context.Background(), p, nil, pressure, true, true)
 			}(params)
 			pendingCase = append(pendingCase, waitingChan)
 
-			if !line.Background {
+			if !line.BackgroundRunning {
 				if err := runCaseWait(pendingCase); err != nil {
 					return err
 				}
@@ -179,9 +181,14 @@ func RunCaseInner(
 		runTime = 1
 	}
 
-	userBatchCount := params.UserBatchCount
-	if userBatchCount <= 0 {
-		userBatchCount = 1
+	batchSize := params.UserBatchCount
+	if batchSize <= 0 || batchSize > runTime {
+		batchSize = runTime
+	}
+
+	if batchSize > 5 {
+		// 强制限制最大并发数 过高没有意义
+		batchSize = 5
 	}
 
 	beginTime := time.Now()
@@ -226,7 +233,6 @@ func RunCaseInner(
 	var errorBreakTriggered atomic.Bool
 
 	// Worker 数量：GOMAXPROCS/2
-	// 直接执行模型中每个 worker 持有一个 task，过多 worker 反而增加调度开销。
 	workers := runtime.GOMAXPROCS(0) / 2
 	if workers < 1 {
 		workers = 1
@@ -239,9 +245,13 @@ func RunCaseInner(
 		userHolderChannel chan *user_data.UserHolder
 	}
 
+	type userCaseData struct {
+		openId            string
+		dispatchTaskCount atomic.Int64
+		totalTaskCount    int64
+	}
 	type userPrivateData struct {
-		finishTaskCount int32
-		totalTaskCount  int32
+		index int32
 	}
 
 	if workers > int(userCount) {
@@ -253,21 +263,39 @@ func RunCaseInner(
 	for i := 0; i < workers; i++ {
 		workerDatas[i] = &workerData{
 			workerIndex:       i,
-			userHolderChannel: make(chan *user_data.UserHolder, (userCount/int64(workers))+1),
+			userHolderChannel: make(chan *user_data.UserHolder, batchSize*((userCount/int64(workers))+1)),
 		}
 	}
 
 	// 格式化所有 openId 字符串 分配入worker
-	openIds := make([]string, userCount)
+	userCaseDatas := make([]*userCaseData, userCount)
 	for i := int64(0); i < userCount; i++ {
-		openIds[i] = params.OpenIDPrefix + strconv.FormatInt(params.OpenIDStart+i, 10)
+		userCaseDatas[i] = &userCaseData{}
+		userCaseDatas[i].openId = params.OpenIDPrefix + strconv.FormatInt(params.OpenIDStart+i, 10)
 		workerIndex := int(i % int64(workers))
-		userHolder := user_data.UserContainerGetUser(openIds[i])
-		userHolder.PrivateData = &userPrivateData{
-			totalTaskCount: int32(runTime),
+		userCaseDatas[i].totalTaskCount = runTime
+
+		userHolder := user_data.UserContainerGetUser(userCaseDatas[i].openId)
+		ud := &userPrivateData{
+			index: int32(i),
 		}
+		userHolder.PrivateData = ud
+		// 先放入1次任务
 		workerDatas[workerIndex].userHolderChannel <- userHolder
+		userCaseDatas[i].dispatchTaskCount.Add(1)
 		workerDatas[workerIndex].totalTaskCount += runTime
+	}
+
+	// 如果并发度高于1 放入后续User
+	if batchSize > 1 {
+		for range batchSize - 1 {
+			for i := int64(0); i < userCount; i++ {
+				workerIndex := int(i % int64(workers))
+				userHolder := user_data.UserContainerGetUser(userCaseDatas[i].openId)
+				workerDatas[workerIndex].userHolderChannel <- userHolder
+				userCaseDatas[i].dispatchTaskCount.Add(1)
+			}
+		}
 	}
 
 	var wg sync.WaitGroup
@@ -282,9 +310,10 @@ func RunCaseInner(
 			var runTaskCount int64
 
 			onFinishFunc := func(task base.TaskActionImpl, err error) {
-				privateData := task.(*TaskActionCase).UserHolder.PrivateData.(*userPrivateData)
-				privateData.finishTaskCount += 1
-				if privateData.finishTaskCount < privateData.totalTaskCount {
+				caseData := userCaseDatas[task.(*TaskActionCase).UserHolder.PrivateData.(*userPrivateData).index]
+				// 先增加已完成的任务数，再决定是否继续分配任务，避免竞争
+				finishTaskCount := caseData.dispatchTaskCount.Add(1)
+				if finishTaskCount <= caseData.totalTaskCount {
 					workerData.userHolderChannel <- task.(*TaskActionCase).UserHolder
 				}
 				if progressBar {

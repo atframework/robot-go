@@ -63,7 +63,7 @@ func startSolo(flagSet *flag.FlagSet) {
 		os.Exit(1)
 	}
 
-	lines, err := robot_case.ParseCaseFileContent(string(content), robot_case.CaseFileModeDistributed)
+	lines, err := robot_case.ParseCaseFileContent(string(content))
 	if err != nil {
 		fmt.Printf("Parse case file error: %v\n", err)
 		os.Exit(1)
@@ -99,6 +99,126 @@ func startSolo(flagSet *flag.FlagSet) {
 		return float64(user_data.OnlineUserCount())
 	})
 
+	type bgResult struct {
+		errMsg    string
+		caseName  string
+		caseIndex int
+	}
+	var bgTasks []chan bgResult
+
+	waitBackground := func() bool {
+		for _, ch := range bgTasks {
+			res := <-ch
+			if res.errMsg != "" {
+				log.Printf("[Solo] Background Case[%d] %s completed with error: %s", res.caseIndex, res.caseName, res.errMsg)
+			} else {
+				log.Printf("[Solo] Background Case[%d] %s completed", res.caseIndex, res.caseName)
+			}
+		}
+		bgTasks = bgTasks[:0]
+		return false
+	}
+
+	// runSoloCase 封装单个 case 的完整执行流程（tracer、pressure、flush、RunCaseInner）
+	runSoloCase := func(caseIndex int, params robot_case.Params) string {
+		log.Printf("[Solo] Case[%d] %s IDs=[%d,%d) QPS=%.1f RunTime=%d",
+			caseIndex, params.CaseName,
+			params.OpenIDStart, params.OpenIDEnd, params.TargetQPS, params.RunTime)
+
+		tracer := report_impl.NewMemoryTracer()
+		pressure := report_impl.NewMemoryPressureController()
+
+		_ = onlineMetrics.Flush()
+		onlineMetrics.StartAutoCollect(time.Second)
+
+		// ── 定时刷新闭包：排空 tracer/pressure/onlineMetrics → Redis + 本地累积 ──
+		caseName := params.CaseName
+		flushOnce := func() {
+			tracings := tracer.Flush()
+
+			var series []*report.MetricsSeries
+
+			snapshots := pressure.FlushSnapshots()
+			if len(snapshots) > 0 {
+				var levelPts, qpsPts, latencyPts []report.MetricsPoint
+				for _, s := range snapshots {
+					levelPts = append(levelPts, report.MetricsPoint{Timestamp: s.Timestamp, Value: float64(s.Level)})
+					qpsPts = append(qpsPts, report.MetricsPoint{Timestamp: s.Timestamp, Value: s.ActualQPS})
+					if s.LatencyP50Ms > 0 {
+						latencyPts = append(latencyPts, report.MetricsPoint{Timestamp: s.Timestamp, Value: s.LatencyP50Ms})
+					}
+				}
+				series = append(series,
+					&report.MetricsSeries{Name: "pressure_level", Labels: map[string]string{"agent": "solo", "case": caseName}, Points: levelPts},
+					&report.MetricsSeries{Name: "actual_qps", Labels: map[string]string{"agent": "solo", "case": caseName}, Points: qpsPts},
+				)
+				if len(latencyPts) > 0 {
+					series = append(series, &report.MetricsSeries{Name: "latency_p50_ms", Labels: map[string]string{"agent": "solo", "case": caseName}, Points: latencyPts})
+				}
+			}
+
+			onlineSeries := onlineMetrics.Flush()
+			for _, s := range onlineSeries {
+				if s.Labels == nil {
+					s.Labels = make(map[string]string)
+				}
+				s.Labels["agent"] = "solo"
+			}
+			series = append(series, onlineSeries...)
+
+			// 写入 Redis（增量 RPush）
+			if len(tracings) > 0 {
+				if err := redisWriter.WriteTracings(reportID, tracings); err != nil {
+					log.Printf("[Solo] flush tracings error: %v", err)
+				}
+			}
+			if len(series) > 0 {
+				if err := redisWriter.WriteMetrics(reportID, series); err != nil {
+					log.Printf("[Solo] flush metrics error: %v", err)
+				}
+			}
+
+			// 本地累积（用于最终 HTML 生成）
+			accMu.Lock()
+			allTracings = append(allTracings, tracings...)
+			allMetrics = append(allMetrics, series...)
+			accMu.Unlock()
+		}
+
+		// 启动定时刷新协程（类似 Agent 模式，每 5 秒刷新一次）
+		flushStopCh := make(chan struct{})
+		flushDone := make(chan struct{})
+		go func() {
+			defer close(flushDone)
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					flushOnce()
+					meta.EndTime = time.Now()
+					_ = redisWriter.WriteMeta(meta)
+				case <-flushStopCh:
+					return
+				}
+			}
+		}()
+
+		ctx := context.Background()
+		errMsg := robot_case.RunCaseInner(ctx, params, tracer, pressure, false, false)
+
+		// 停止定时刷新
+		close(flushStopCh)
+		<-flushDone
+
+		onlineMetrics.StopAutoCollect()
+		onlineMetrics.Collect()
+
+		// 最终刷新（捕获剩余未被 ticker 捞到的数据）
+		flushOnce()
+		return errMsg
+	}
+
 	errorBreak := false
 	for round := 0; round < repeatedTime; round++ {
 		for i, line := range lines {
@@ -108,17 +228,20 @@ func startSolo(flagSet *flag.FlagSet) {
 			if line.IsControl {
 				cp := line.Control
 				cp.CaseIndex = caseIndex
-				log.Printf("[Solo] Round %d/%d Control[%d] @%s args=%v",
-					round+1, repeatedTime, caseIndex, cp.Name, cp.Args)
-				if err := robot_case.RunControlInner(context.Background(), cp); err != nil {
-					log.Printf("[Solo] Control[%d] @%s failed: %v", caseIndex, cp.Name, err)
-					if cp.ErrorBreak {
-						log.Printf("[Solo] ErrorBreak=true, stopping")
-						errorBreak = true
-						break
+
+				ch := make(chan bgResult, 1)
+				bgTasks = append(bgTasks, ch)
+				go func(cp robot_case.ControlParams, idx int) {
+					log.Printf("[Solo] Round %d/%d Control[%d] @%s args=%v",
+						round+1, repeatedTime, idx, cp.Name, cp.Args)
+					errMsg := ""
+					if err := robot_case.RunControlInner(context.Background(), cp); err != nil {
+						errMsg = err.Error()
 					}
-				} else {
-					log.Printf("[Solo] Control[%d] @%s completed", caseIndex, cp.Name)
+					ch <- bgResult{errMsg: errMsg, caseName: "@" + cp.Name, caseIndex: idx}
+				}(cp, caseIndex)
+				if !line.BackgroundRunning {
+					waitBackground()
 				}
 				continue
 			}
@@ -126,113 +249,24 @@ func startSolo(flagSet *flag.FlagSet) {
 			params := line.Stress
 			params.CaseIndex = caseIndex
 
-			log.Printf("[Solo] Round %d/%d Case[%d] %s IDs=[%d,%d) QPS=%.1f RunTime=%d",
-				round+1, repeatedTime, caseIndex, params.CaseName,
-				params.OpenIDStart, params.OpenIDEnd, params.TargetQPS, params.RunTime)
-
-			tracer := report_impl.NewMemoryTracer()
-			pressure := report_impl.NewMemoryPressureController()
-
-			_ = onlineMetrics.Flush()
-			onlineMetrics.StartAutoCollect(time.Second)
-
-			// ── 定时刷新闭包：排空 tracer/pressure/onlineMetrics → Redis + 本地累积 ──
-			caseName := params.CaseName
-			flushOnce := func() {
-				tracings := tracer.Flush()
-
-				var series []*report.MetricsSeries
-
-				snapshots := pressure.FlushSnapshots()
-				if len(snapshots) > 0 {
-					var levelPts, qpsPts, latencyPts []report.MetricsPoint
-					for _, s := range snapshots {
-						levelPts = append(levelPts, report.MetricsPoint{Timestamp: s.Timestamp, Value: float64(s.Level)})
-						qpsPts = append(qpsPts, report.MetricsPoint{Timestamp: s.Timestamp, Value: s.ActualQPS})
-						if s.LatencyP50Ms > 0 {
-							latencyPts = append(latencyPts, report.MetricsPoint{Timestamp: s.Timestamp, Value: s.LatencyP50Ms})
-						}
-					}
-					series = append(series,
-						&report.MetricsSeries{Name: "pressure_level", Labels: map[string]string{"agent": "solo", "case": caseName}, Points: levelPts},
-						&report.MetricsSeries{Name: "actual_qps", Labels: map[string]string{"agent": "solo", "case": caseName}, Points: qpsPts},
-					)
-					if len(latencyPts) > 0 {
-						series = append(series, &report.MetricsSeries{Name: "latency_p50_ms", Labels: map[string]string{"agent": "solo", "case": caseName}, Points: latencyPts})
-					}
-				}
-
-				onlineSeries := onlineMetrics.Flush()
-				for _, s := range onlineSeries {
-					if s.Labels == nil {
-						s.Labels = make(map[string]string)
-					}
-					s.Labels["agent"] = "solo"
-				}
-				series = append(series, onlineSeries...)
-
-				// 写入 Redis（增量 RPush）
-				if len(tracings) > 0 {
-					if err := redisWriter.WriteTracings(reportID, tracings); err != nil {
-						log.Printf("[Solo] flush tracings error: %v", err)
-					}
-				}
-				if len(series) > 0 {
-					if err := redisWriter.WriteMetrics(reportID, series); err != nil {
-						log.Printf("[Solo] flush metrics error: %v", err)
-					}
-				}
-
-				// 本地累积（用于最终 HTML 生成）
-				accMu.Lock()
-				allTracings = append(allTracings, tracings...)
-				allMetrics = append(allMetrics, series...)
-				accMu.Unlock()
-			}
-
-			// 启动定时刷新协程（类似 Agent 模式，每 5 秒刷新一次）
-			flushStopCh := make(chan struct{})
-			flushDone := make(chan struct{})
-			go func() {
-				defer close(flushDone)
-				ticker := time.NewTicker(5 * time.Second)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ticker.C:
-						flushOnce()
-						meta.EndTime = time.Now()
-						_ = redisWriter.WriteMeta(meta)
-					case <-flushStopCh:
-						return
-					}
-				}
-			}()
-
-			ctx := context.Background()
-			errMsg := robot_case.RunCaseInner(ctx, params, tracer, pressure, false, false)
-
-			// 停止定时刷新
-			close(flushStopCh)
-			<-flushDone
-
-			onlineMetrics.StopAutoCollect()
-			onlineMetrics.Collect()
-
-			// 最终刷新（捕获剩余未被 ticker 捞到的数据）
-			flushOnce()
-
-			if errMsg != "" {
-				log.Printf("[Solo] Case[%d] %s completed with error: %s", caseIndex, params.CaseName, errMsg)
-				if params.ErrorBreak {
-					log.Printf("[Solo] ErrorBreak=true, stopping")
-					errorBreak = true
-					break
-				}
-			} else {
-				log.Printf("[Solo] Case[%d] %s completed", caseIndex, params.CaseName)
+			// 以后台方式启动 case，非 & 行启动后立即等待所有 pending 任务完成
+			ch := make(chan bgResult, 1)
+			bgTasks = append(bgTasks, ch)
+			go func(params robot_case.Params, idx int) {
+				log.Printf("[Solo] Round %d/%d Case[%d] %s IDs=[%d,%d) QPS=%.1f RunTime=%d",
+					round+1, repeatedTime, idx, params.CaseName,
+					params.OpenIDStart, params.OpenIDEnd, params.TargetQPS, params.RunTime)
+				errMsg := runSoloCase(idx, params)
+				ch <- bgResult{errMsg: errMsg, caseName: params.CaseName, caseIndex: idx}
+			}(params, caseIndex)
+			if !line.BackgroundRunning {
+				waitBackground()
 			}
 		}
+
+		// 每轮结束时等待剩余后台任务
+		waitBackground()
+
 		if errorBreak {
 			break
 		}

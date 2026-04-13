@@ -57,7 +57,7 @@ type CaseFileLine struct {
 	// IsControl 为 true 时使用 Control 字段，否则使用 Stress 字段
 	IsControl bool
 	// Background 是否后台执行（行尾有 &）
-	Background bool
+	BackgroundRunning bool
 	// Stress 压测参数（IsControl=false 时有效）
 	Stress Params
 	// Control 控制指令参数（IsControl=true 时有效）

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	robot_case "github.com/atframework/robot-go/case"
@@ -38,10 +39,11 @@ type AgentConfig struct {
 
 // Agent 分布式压测执行端（主动向 Master 拉取任务）
 type Agent struct {
-	cfg           AgentConfig
-	writer        *report_impl.RedisReportWriter
-	client        *http.Client
-	onlineMetrics *report_impl.MemoryMetricsCollector // 进程级 online_users，跨 task 持续采集
+	cfg             AgentConfig
+	writer          *report_impl.RedisReportWriter
+	client          *http.Client
+	onlineMetrics   *report_impl.MemoryMetricsCollector // 进程级 online_users，跨 task 持续采集
+	activeTaskCount int64                               // 当前并发执行中的任务数（原子操作）
 }
 
 // NewAgent 创建 Agent 实例并连接 Redis
@@ -106,7 +108,8 @@ func (a *Agent) pollLoop() {
 			// 204 No Content：master 无任务，poll 本身已包含 30s 等待，立即重试
 			continue
 		}
-		a.executeTask(task)
+		// 并发执行任务，不阻塞轮询循环，支持 & 后台并行任务
+		go a.executeTask(task)
 	}
 }
 
@@ -150,10 +153,11 @@ func (a *Agent) executeTask(task *robot_case.AgentTask) {
 	tracer := report_impl.NewMemoryTracer()
 	pressure := report_impl.NewMemoryPressureController()
 
-	// 丢弃 task 开始前积累的 online_users 历史数据（agent 启动到 task 开始之间的数据不属于本次报告）
-	_ = a.onlineMetrics.Flush()
-	// 仅在任务执行期间采集 online_users，避免空闲时数据无限堆积
-	a.onlineMetrics.StartAutoCollect(time.Second)
+	// 引用计数：首个并发任务启动时丢弃空闲期数据并开启采集；后续并发任务直接复用
+	if atomic.AddInt64(&a.activeTaskCount, 1) == 1 {
+		_ = a.onlineMetrics.Flush()
+		a.onlineMetrics.StartAutoCollect(time.Second)
+	}
 
 	// 创建 cancel context，用于取消机制
 	ctx, cancel := context.WithCancel(context.Background())
@@ -211,9 +215,11 @@ func (a *Agent) executeTask(task *robot_case.AgentTask) {
 	cancel()
 	execWg.Wait()
 
-	// 停止 online_users 自动采集，并手动采一次最终快照
-	a.onlineMetrics.StopAutoCollect()
-	a.onlineMetrics.Collect()
+	// 最后一个并发任务结束时停止采集并补采一次最终快照
+	if atomic.AddInt64(&a.activeTaskCount, -1) == 0 {
+		a.onlineMetrics.StopAutoCollect()
+		a.onlineMetrics.Collect()
+	}
 
 	// 最终 flush 剩余数据
 	tracings := tracer.Flush()

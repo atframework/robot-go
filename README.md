@@ -332,6 +332,31 @@ func init() {
 
 ### 用例系统 (Case)
 
+#### 单用户并发模型 (UserBatchCount)
+
+每个用户（OpenID）的任务执行遵循以下并发模型：
+
+1. **初始填充阶段**：框架启动时，为每个用户一次性投放 `user_batch_count` 个令牌（任务槽位）到 worker channel 中，所有令牌对应的任务会被立即调度执行。
+2. **令牌归还阶段**：当任一任务完成（无论成功或失败）后，框架通过原子 CAS 操作检查该用户已入队的任务数是否已达 `totalTaskCount`（= `run_time`），若未达到则归还一个令牌（重新入队一次 UserHolder），使得下一个任务被调度。
+3. **并发控制语义**：`user_batch_count` 控制的是单用户同时处于 **in-flight** 状态的任务上限。各任务通过 `User.TakeActionGuard()` / `ReleaseActionGuard()` 互斥锁保证同一时刻只有一个任务在实际执行用户操作，但允许多个任务同时等待 IO（如 RPC 响应）。
+
+```
+User A (batch_count=3):
+  ┌─ Task 1: [Executing] ──→ [Waiting IO] ──→ [Executing] ──→ [Done] → 归还令牌
+  ├─ Task 2: [Waiting IO] ──→ [Executing] ──→ [Waiting IO] ──→ [Done] → 归还令牌
+  └─ Task 3: [Waiting IO] ──→ [Waiting IO] ──→ [Executing] ──→ [Done] → 归还令牌
+              ↑ 同一时刻最多 1 个在执行，但可有多个在等待 IO
+```
+
+| `user_batch_count` | 行为 |
+|---------------------|------|
+| `0` | 不限制，等同于 `run_time`（所有任务一次性全部投放） |
+| `1` | 串行执行，前一个任务完全结束后才启动下一个 |
+| `N` (N > 1) | 同时最多 N 个任务 in-flight，利用 IO 等待时间提升吞吐 |
+| 上限 `5` | 框架强制不超过 5，过高无实际意义（IO 并发收益递减） |
+
+该模型适用于需要模拟"单用户多连接"或"单用户流水线式 RPC 调用"的场景。
+
 #### 注册用例
 
 ```go
@@ -349,62 +374,35 @@ func LoginCase(action *robot_case.TaskActionCase, openId string, args []string) 
 }
 ```
 
-#### 普通用例配置文件
-
-通过 `-case_file` 指定，格式：
+#### 用例配置文件
 
 ```
-<case_name> <openid_prefix> <user_count> <batch_count> <iterations> [args...] [&]
+<case_name> <error_break> <openid_prefix> <id_begin> <id_end> <target_qps> <user_batch_count> <run_time> [args...] [&]
 ```
 
 | 字段 | 说明 |
 |------|------|
 | `case_name` | 已注册的用例名称 |
+| `error_break` | bool | `true`/`false`：遇到错误是否立即停止 |
 | `openid_prefix` | 用户 OpenID 前缀，自动追加序号 |
-| `user_count` | 模拟用户数量 |
-| `batch_count` | 最大并发数 |
-| `iterations` | 每个用户执行次数 |
-| `&` | 行尾加 `&` 表示异步执行 |
+| `id_start` | int64 | 账号起始编号（含） |
+| `id_end` | int64 | 账号结束编号（不含） |
+| `target_qps` | 目标 QPS，`0` 表示不限速 |
+| `user_batch_count` | 单用户并发度（同时 in-flight 的任务数上限），`0` 表示不限制 |
+| `run_time` | 每个用户执行次数 |
+| `args` | strings | 额外透传参数 |
+| `&` | 行尾加 `&` 表示异步执行（后台运行，不阻塞后续行） |
 
 以 `#` 开头的行为注释。示例：
 
 ```conf
-# 登录
-login 1250001 60 60 1
-# 并发 GetInfo 测试
-run_cmd 1250001 60 60 1 user getInfo &
-run_cmd 1250001 60 60 1 user getInfo
+# 登录 (user_count=60, qps=0不限速, batch=1, run_time=1)
+login true 1250000 0 60 0 1 1
+# 并发 GetInfo 测试 (并发两个执行)
+run_cmd false 1250000 0 60 0 1 1 user getInfo &
+run_cmd false 1250000 0 60 0 1 1 user getInfo
 # 登出
-logout 1250001 60 60 1
-```
-
-#### 压测用例配置文件（`#!stress`）
-
-文件首行为 `#!stress` 时切换到压测模式（Solo 和 Agent 模式使用）。每行定义一个压测用例：
-
-```
-<case_name> <error_break> <openid_prefix> <id_start> <id_end> <batch_count> <target_qps> <run_time> [args...]
-```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `case_name` | string | 已注册的用例名称 |
-| `error_break` | bool | `true`/`false`：遇到错误是否立即停止 |
-| `openid_prefix` | string | 账号 ID 前缀 |
-| `id_start` | int64 | 账号起始编号（含） |
-| `id_end` | int64 | 账号结束编号（不含） |
-| `batch_count` | int64 | 最大并发数 |
-| `target_qps` | float64 | 目标 QPS，`0` 表示不限速 |
-| `run_time` | int64 | 持续时长（秒），`0` 表示每账号只执行一次 |
-| `args` | strings | 额外透传参数 |
-
-示例（`benchmark.conf`）：
-
-```conf
-#!stress
-# caseName   errorBreak  prefix    start  end    batch  qps   runTime
-login_bench  false       test_     1      1001   50     50    60
-query_bench  false       test_     1      1001   100    100   60
+logout true 1250000 0 60 0 1 1
 ```
 
 #### QPS 令牌桶行为
@@ -419,8 +417,7 @@ query_bench  false       test_     1      1001   100    100   60
 #### 交互模式执行用例
 
 ```
-run-case <case_name> <openid_prefix> <user_count> <batch_count> <iterations> [args...]
-run-case-stress <caseName> <errorBreak> <openIdPrefix> <idStart> <idEnd> <batchCount> <targetQPS> <runTime> [args...]
+run-case-file <file> <repeated_time>
 ```
 
 ## 报告系统

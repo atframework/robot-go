@@ -31,7 +31,7 @@ func (m *Master) distributeAndWait(ctx context.Context, reportID, caseFileConten
 	}
 
 	// 解析 case 文件（统一解析控制指令 + 压测行）
-	lines, err := robot_case.ParseCaseFileContent(caseFileContent, robot_case.CaseFileModeDistributed)
+	lines, err := robot_case.ParseCaseFileContent(caseFileContent)
 	if err != nil {
 		return err
 	}
@@ -39,11 +39,32 @@ func (m *Master) distributeAndWait(ctx context.Context, reportID, caseFileConten
 		return fmt.Errorf("no case lines found")
 	}
 
+	// waitBackground 等待所有后台任务完成，返回第一个错误
+	type bgResult struct {
+		err       error
+		caseIndex int
+		name      string
+	}
+	var bgTasks []chan bgResult
+
+	waitBackground := func() error {
+		var firstErr error
+		for _, ch := range bgTasks {
+			res := <-ch
+			if res.err != nil && firstErr == nil {
+				firstErr = res.err
+			}
+		}
+		bgTasks = bgTasks[:0]
+		return firstErr
+	}
+
 	for round := 0; round < repeatedTime; round++ {
 		for i, line := range lines {
 			// 检查是否已取消
 			select {
 			case <-ctx.Done():
+				_ = waitBackground()
 				return fmt.Errorf("task cancelled")
 			default:
 			}
@@ -53,26 +74,49 @@ func (m *Master) distributeAndWait(ctx context.Context, reportID, caseFileConten
 			if line.IsControl {
 				cp := line.Control
 				cp.CaseIndex = caseIndex
-				if err := m.distributeControlInstruction(ctx, reportID, caseIndex, cp, targetGroup, targetAgents); err != nil {
-					if cp.ErrorBreak {
-						return fmt.Errorf("control[%d] @%s: %w", caseIndex, cp.Name, err)
+
+				ch := make(chan bgResult, 1)
+				bgTasks = append(bgTasks, ch)
+				go func(cp robot_case.ControlParams, idx int) {
+					err := m.distributeControlInstruction(ctx, reportID, idx, cp, targetGroup, targetAgents)
+					if err != nil {
+						log.Printf("[Master] Control[%d] @%s round=%d error: %v", idx, cp.Name, round, err)
+					} else {
+						log.Printf("[Master] Control[%d] @%s round=%d completed", idx, cp.Name, round)
 					}
-					log.Printf("[Master] Control[%d] @%s round=%d completed with errors (ErrorBreak=false, continuing): %v", caseIndex, cp.Name, round, err)
-				} else {
-					log.Printf("[Master] Control[%d] @%s round=%d completed", caseIndex, cp.Name, round)
+					ch <- bgResult{err: err, caseIndex: idx, name: "@" + cp.Name}
+				}(cp, caseIndex)
+				if !line.BackgroundRunning {
+					if bgErr := waitBackground(); bgErr != nil {
+						log.Printf("[Master] Background task error at Control[%d]: %v", caseIndex, bgErr)
+					}
 				}
 			} else {
 				params := line.Stress
 				params.CaseIndex = caseIndex
-				if err := m.distributeSingleCase(ctx, reportID, caseIndex, params, targetGroup, targetAgents, distributeMode); err != nil {
-					if params.ErrorBreak {
-						return fmt.Errorf("case[%d] %s: %w", caseIndex, params.CaseName, err)
+
+				ch := make(chan bgResult, 1)
+				bgTasks = append(bgTasks, ch)
+				go func(params robot_case.Params, idx int) {
+					err := m.distributeSingleCase(ctx, reportID, idx, params, targetGroup, targetAgents, distributeMode)
+					if err != nil {
+						log.Printf("[Master] Case[%d] %s round=%d error: %v", idx, params.CaseName, round, err)
+					} else {
+						log.Printf("[Master] Case[%d] %s round=%d completed", idx, params.CaseName, round)
 					}
-					log.Printf("[Master] Case[%d] %s round=%d completed with errors (ErrorBreak=false, continuing): %v", caseIndex, params.CaseName, round, err)
-				} else {
-					log.Printf("[Master] Case[%d] %s round=%d completed", caseIndex, params.CaseName, round)
+					ch <- bgResult{err: err, caseIndex: idx, name: params.CaseName}
+				}(params, caseIndex)
+				if !line.BackgroundRunning {
+					if bgErr := waitBackground(); bgErr != nil {
+						log.Printf("[Master] Background task error at Case[%d]: %v", caseIndex, bgErr)
+					}
 				}
 			}
+		}
+
+		// 每轮结束时等待剩余后台任务
+		if bgErr := waitBackground(); bgErr != nil {
+			log.Printf("[Master] Background tasks in round %d completed with errors: %v", round, bgErr)
 		}
 	}
 	return nil
