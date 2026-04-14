@@ -30,11 +30,11 @@ func init() {
 		}
 
 		holder := user_data.UserContainerTryGetUser(strconv.FormatUint(uint64(userId), 10))
-		if holder == nil || lu.IsNil(holder.User) {
+		if holder == nil || lu.IsNil(holder.GetUser()) {
 			return "not found user"
 		}
 
-		SetCurrentUser(holder.User)
+		SetCurrentUser(holder.GetUser())
 		return ""
 	}, "<userId>", "切换登录User", AutoCompleteUseIdWithoutCurrent)
 }

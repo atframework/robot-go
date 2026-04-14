@@ -294,8 +294,7 @@ func (t *TaskActionBase) InitTimeoutTimer(timer *time.Timer) {
 }
 
 type TaskActionManager struct {
-	taskIdAlloc atomic.Uint64
-	wg          sync.WaitGroup
+	wg sync.WaitGroup
 
 	// 池模式
 	workerPool *ants.PoolWithFunc
@@ -305,12 +304,17 @@ type TaskActionManager struct {
 	active   map[uint64]TaskActionImpl
 }
 
+var taskIdAlloc atomic.Uint64
+
+func init() {
+	taskIdAlloc.Store(
+		uint64(time.Since(time.Unix(1577836800, 0)).Nanoseconds()))
+}
+
 func NewTaskActionManager() *TaskActionManager {
 	ret := &TaskActionManager{
 		active: make(map[uint64]TaskActionImpl),
 	}
-	ret.taskIdAlloc.Store(
-		uint64(time.Since(time.Unix(1577836800, 0)).Nanoseconds()))
 	return ret
 }
 
@@ -321,8 +325,6 @@ func NewTaskActionManagerWithPool(poolSize int) *TaskActionManager {
 		poolSize = 256
 	}
 	ret := &TaskActionManager{}
-	ret.taskIdAlloc.Store(
-		uint64(time.Since(time.Unix(1577836800, 0)).Nanoseconds()))
 	ret.workerPool, _ = ants.NewPoolWithFunc(poolSize, func(i any) {
 		if task, ok := i.(TaskActionImpl); ok {
 			task.Finish(task.HookRun())
@@ -343,8 +345,7 @@ func (m *TaskActionManager) ReleasePool() {
 }
 
 func (m *TaskActionManager) allocTaskId() uint64 {
-	id := m.taskIdAlloc.Add(1)
-	return id
+	return taskIdAlloc.Add(1)
 }
 
 func (m *TaskActionManager) WaitAll() {

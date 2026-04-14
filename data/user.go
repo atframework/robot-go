@@ -98,13 +98,24 @@ func CreateDefaultUserLogHandler(openId string) func(format string, a ...any) {
 }
 
 type UserHolder struct {
-	User
+	user        *lu.AtomicInterface[User]
 	OpenId      string
 	PrivateData any
 }
 
+func (h *UserHolder) InitUser(u User) {
+	h.user = lu.NewAtomicInterface(u)
+}
+
+func (h *UserHolder) GetUser() User {
+	if h == nil {
+		return nil
+	}
+	return h.user.Load()
+}
+
 func (h *UserHolder) IsUserVaildLogin() bool {
-	return h != nil && h.User != nil && h.User.IsLogin()
+	return h != nil && !lu.IsNil(h.GetUser()) && h.GetUser().IsLogin()
 }
 
 var userMapContainer = sync.Map{}
@@ -133,17 +144,17 @@ func UserContainerTryGetUser(openId string) *UserHolder {
 }
 
 func UserContainerDelUser(holder *UserHolder) {
-	userMapContainer.CompareAndDelete(holder.GetOpenId(), holder)
+	userMapContainer.CompareAndDelete(holder.GetUser().GetOpenId(), holder)
 }
 
 // LogoutAllUsers 登出并清理所有在线用户
 func LogoutAllUsers() {
 	userMapContainer.Range(func(_, value any) bool {
 		holder := value.(*UserHolder)
-		if lu.IsNil(holder.User) {
+		if lu.IsNil(holder.GetUser()) {
 			return true
 		}
-		holder.Logout()
+		holder.GetUser().Logout()
 		return true
 	})
 	userMapContainer.Clear()
@@ -153,10 +164,10 @@ func GetAllUsers() []User {
 	var users []User
 	userMapContainer.Range(func(_, value any) bool {
 		holder := value.(*UserHolder)
-		if lu.IsNil(holder.User) {
+		if lu.IsNil(holder.GetUser()) {
 			return true
 		}
-		users = append(users, holder.User)
+		users = append(users, holder.GetUser())
 		return true
 	})
 	return users
