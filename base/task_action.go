@@ -262,7 +262,7 @@ func (t *TaskActionBase) AfterYield() error {
 }
 
 func (t *TaskActionBase) IsTakenActionGuard() bool {
-	return false
+	return true
 }
 
 func (t *TaskActionBase) InitTaskId(id uint64) {
