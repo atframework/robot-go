@@ -55,6 +55,11 @@ func SetCurrentUser(user user_data.User) {
 		currentUser.Store(nil)
 	} else {
 		currentUser.Store(&user)
+		user.AddOnClosedHandler(func(u user_data.User) {
+			if GetCurrentUser() != nil && GetCurrentUser() == u {
+				SetCurrentUser(nil)
+			}
+		})
 	}
 
 	rlInst := utils.GetCurrentReadlineInstance()
