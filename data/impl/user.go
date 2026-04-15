@@ -47,7 +47,7 @@ type User struct {
 	taskActionGuard   sync.Mutex
 	takeActionGuardId atomic.Uint64
 
-	messageHandler map[string]func(*user_data.TaskActionUser, proto.Message, int32) error
+	messageHandler map[string]user_data.MessageHandlerFunc
 
 	extralData map[string]any
 }
@@ -73,7 +73,7 @@ func NewUser(openId string, c conn.Connection, bufferWriter *log.LogBufferedRota
 		rpcAwaitTask:            user_data.NewRPCRingBuffer(256),
 		csLog:                   bufferWriter,
 		taskManager:             base.NewTaskActionManager(),
-		messageHandler:          make(map[string]func(*user_data.TaskActionUser, proto.Message, int32) error),
+		messageHandler:          make(map[string]user_data.MessageHandlerFunc),
 		logHandler:              logHandler,
 		receiveHandlerCloseChan: make(chan struct{}, 1),
 	}
@@ -196,7 +196,7 @@ func (user *User) RunTaskDefaultTimeout(f func(*user_data.TaskActionUser) error,
 }
 
 type rpcResumeData struct {
-	body    proto.Message
+	body    *pu.LazyUnmarshalProtobufMessage
 	rspCode int32
 }
 
@@ -243,24 +243,6 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 			continue
 		}
 
-		// errorCode = csMsg.Head.ErrorCode
-		// csMsgHead = csMsg.Head
-		// bodyBin = csMsg.BodyBin
-		// sequence = csMsg.Head.ClientSequence
-
-		// switch csMsg.Head.GetRpcType().(type) {
-		// case *public_protocol_extension.CSMsgHead_RpcResponse:
-		// 	rpcName = csMsg.Head.GetRpcResponse().GetRpcName()
-		// 	typeName = csMsg.Head.GetRpcResponse().GetTypeUrl()
-		// case *public_protocol_extension.CSMsgHead_RpcStream:
-		// 	rpcName = csMsg.Head.GetRpcStream().GetRpcName()
-		// 	typeName = csMsg.Head.GetRpcStream().GetTypeUrl()
-		// default:
-		// 	user.Log("<<<<<<<<<<<<<<<<<<<< Received: Unsupport RpcType <<<<<<<<<<<<<<<<<<<<")
-		// 	user.Log("%s", prototext.Format(csMsgHead))
-		// 	continue
-		// }
-
 		if user.logHandler != nil {
 			user.Log("User: %d Code: %d <<<<<<<<<<<<<<<< Received: %s <<<<<<<<<<<<<<<<<<<", user.GetUserId(), errorCode, rpcName)
 		}
@@ -275,23 +257,24 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 			}
 			continue
 		}
-		csBody := messageType.New().Interface()
-
-		err = proto.Unmarshal(bodyBin, csBody)
-		if err != nil {
-			if user.logHandler != nil {
-				user.Log("Error in Unmarshal: %v", err)
-			}
-			if user.csLog != nil {
-				fmt.Fprintf(user.csLog, "%s %s\nHead:%s", time.Now().Format("2006-01-02 15:04:05.000"),
-					fmt.Sprintf("<<<<<<<<<<<<<<<<<<<< Unmarshal Error Received: %s <<<<<<<<<<<<<<<<<<<", rpcName), pu.MessageReadableTextIndent(csMsgHead))
-			}
-			return
+		if user.csLog != nil {
+			fmt.Fprintf(user.csLog, "%s %s\nHead:%s\n", time.Now().Format("2006-01-02 15:04:05.000"),
+				fmt.Sprintf("<<<<<<<<<<<<<<<<<<<< Received: %s <<<<<<<<<<<<<<<<<<< Seq: %d <<<<<", rpcName, sequence), pu.MessageReadableTextIndent(csMsgHead))
 		}
 
-		if user.csLog != nil {
-			fmt.Fprintf(user.csLog, "%s %s\nHead:%s\nBody:%s", time.Now().Format("2006-01-02 15:04:05.000"),
-				fmt.Sprintf("<<<<<<<<<<<<<<<<<<<< Received: %s <<<<<<<<<<<<<<<<<<<", rpcName), pu.MessageReadableTextIndent(csMsgHead), pu.MessageReadableTextIndent(csBody))
+		onUnmarshal := func(msg proto.Message, err error) {
+			if err != nil {
+				if user.logHandler != nil {
+					user.Log("Error in Unmarshal: %v", err)
+				}
+				if user.csLog != nil {
+					fmt.Fprintf(user.csLog, "%s %s\nHead:%s", time.Now().Format("2006-01-02 15:04:05.000"),
+						fmt.Sprintf("<<<<<<<<<<<<<<<<<<<< Unmarshal Error Received: %s <<<<<<<<<<<<<<<<<<< Seq: %d <<<<<", rpcName, sequence), pu.MessageReadableTextIndent(csMsgHead))
+				}
+			} else {
+				fmt.Fprintf(user.csLog, "%s %s\nBody:%s", time.Now().Format("2006-01-02 15:04:05.000"),
+					fmt.Sprintf("<<<<<<<<<<<<<<<<<<<< Received: %s <<<<<<<<<<<<<<<<<<< Seq: %d <<<<<", rpcName, sequence), pu.MessageReadableTextIndent(msg))
+			}
 		}
 		task, ok := user.rpcAwaitTask.LoadAndDelete(sequence)
 		if ok {
@@ -302,7 +285,7 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 			}, &base.TaskActionResumeData{
 				Err: nil,
 				Data: rpcResumeData{
-					body:    csBody,
+					body:    pu.CreateLazyUnmarshalProtobufMessage(bodyBin, messageType, onUnmarshal),
 					rspCode: errorCode,
 				},
 			})
@@ -311,7 +294,7 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 			f, ok := user.messageHandler[rpcName]
 			if ok && f != nil {
 				user.RunTaskDefaultTimeout(func(tau *user_data.TaskActionUser) error {
-					return f(tau, csBody, errorCode)
+					return f(tau, pu.CreateLazyUnmarshalProtobufMessage(bodyBin, messageType, onUnmarshal), errorCode)
 				}, rpcName)
 			}
 		}
@@ -350,7 +333,7 @@ type RpcTimeout struct {
 }
 
 func (user *User) SendReq(action base.TaskActionImpl, csMsg proto.Message,
-	csHead proto.Message, csBody proto.Message, rpcName string, sequence uint64, needRsp bool) (int32, proto.Message, error) {
+	csHead proto.Message, csBody proto.Message, rpcName string, sequence uint64, needRsp bool) (int32, *pu.LazyUnmarshalProtobufMessage, error) {
 	if user == nil {
 		return 0, nil, fmt.Errorf("no login")
 	}
@@ -427,7 +410,7 @@ func (user *User) Close() {
 	}
 }
 
-func (user *User) RegisterMessageHandler(rpcName string, f func(*user_data.TaskActionUser, proto.Message, int32) error) {
+func (user *User) RegisterMessageHandler(rpcName string, f user_data.MessageHandlerFunc) {
 	user.messageHandler[rpcName] = f
 }
 

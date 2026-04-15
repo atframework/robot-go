@@ -1,5 +1,5 @@
-github.com/atframework/atframe-utils-go v1.0.4-0.20260409095214-e5bcad272063 h1:POS19xtGiiKLZzBaiKHshGv0b/YFKVSo+cSAjRh8r5Y=
-github.com/atframework/atframe-utils-go v1.0.4-0.20260409095214-e5bcad272063/go.mod h1:Nz9aqcllJkgj05rAoBMOhfQhoqUp/Xp636UX6OnJjuY=
+github.com/atframework/atframe-utils-go v1.0.5-0.20260415092013-23b411f59869 h1:a5uB1/YGLeH+2uMzX8D2wdkJ78Yb2/sy8l+GRDGNXm4=
+github.com/atframework/atframe-utils-go v1.0.5-0.20260415092013-23b411f59869/go.mod h1:Nz9aqcllJkgj05rAoBMOhfQhoqUp/Xp636UX6OnJjuY=
 github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=
 github.com/bsm/ginkgo/v2 v2.12.0/go.mod h1:SwYbGRRDovPVboqFv0tPTcG1sN61LM1Z4ARdbAV9g4c=
 github.com/bsm/gomega v1.27.10 h1:yeMWxP2pV2fG3FgAODIY8EiRE3dy0aeFYt4l7wh6yKA=

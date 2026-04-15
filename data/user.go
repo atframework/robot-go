@@ -8,6 +8,7 @@ import (
 
 	lu "github.com/atframework/atframe-utils-go/lang_utility"
 	log "github.com/atframework/atframe-utils-go/log"
+	pu "github.com/atframework/atframe-utils-go/proto_utility"
 	base "github.com/atframework/robot-go/base"
 	conn "github.com/atframework/robot-go/conn"
 	"google.golang.org/protobuf/proto"
@@ -23,6 +24,8 @@ type UserReceiveUnpackFunc func(proto.Message) (
 	err error)
 type UserReceiveCreateMessageFunc func() proto.Message
 
+type MessageHandlerFunc func(*TaskActionUser, *pu.LazyUnmarshalProtobufMessage, int32) error
+
 type User interface {
 	IsLogin() bool
 	Login()
@@ -31,7 +34,7 @@ type User interface {
 	AllocSequence() uint64
 	ReceiveHandler(unpack UserReceiveUnpackFunc, createMsg UserReceiveCreateMessageFunc)
 	SendReq(action base.TaskActionImpl, csMsg proto.Message, csHead proto.Message,
-		csBody proto.Message, rpcName string, sequence uint64, needRsp bool) (int32, proto.Message, error)
+		csBody proto.Message, rpcName string, sequence uint64, needRsp bool) (int32, *pu.LazyUnmarshalProtobufMessage, error)
 
 	TakeActionGuard(task base.TaskActionImpl) error
 	ReleaseActionGuard(task base.TaskActionImpl) error
@@ -56,7 +59,7 @@ type User interface {
 	SetHeartbeatInterval(time.Duration)
 	SetLastPingTime(time.Time)
 	SetHasGetInfo(bool)
-	RegisterMessageHandler(rpcName string, f func(*TaskActionUser, proto.Message, int32) error)
+	RegisterMessageHandler(rpcName string, f MessageHandlerFunc)
 
 	GetExtralData(key string) any
 	SetExtralData(key string, value any)
