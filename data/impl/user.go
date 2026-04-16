@@ -272,8 +272,10 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 						fmt.Sprintf("<<<<<<<<<<<<<<<<<<<< Unmarshal Error Received: %s <<<<<<<<<<<<<<<<<<< Seq: %d <<<<<", rpcName, sequence), pu.MessageReadableTextIndent(csMsgHead))
 				}
 			} else {
-				fmt.Fprintf(user.csLog, "%s %s\nBody:%s", time.Now().Format("2006-01-02 15:04:05.000"),
-					fmt.Sprintf("<<<<<<<<<<<<<<<<<<<< Received: %s <<<<<<<<<<<<<<<<<<< Seq: %d <<<<<", rpcName, sequence), pu.MessageReadableTextIndent(msg))
+				if user.csLog != nil {
+					fmt.Fprintf(user.csLog, "%s %s\nBody:%s", time.Now().Format("2006-01-02 15:04:05.000"),
+						fmt.Sprintf("<<<<<<<<<<<<<<<<<<<< Received: %s <<<<<<<<<<<<<<<<<<< Seq: %d <<<<<", rpcName, sequence), pu.MessageReadableTextIndent(msg))
+				}
 			}
 		}
 		task, ok := user.rpcAwaitTask.LoadAndDelete(sequence)
