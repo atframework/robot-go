@@ -14,6 +14,7 @@ import (
 	user_interface "github.com/atframework/robot-go/data"
 	user_impl "github.com/atframework/robot-go/data/impl"
 	agent "github.com/atframework/robot-go/mode/agent"
+	dbtool "github.com/atframework/robot-go/mode/dbtool"
 	solo "github.com/atframework/robot-go/mode/solo"
 	standalone "github.com/atframework/robot-go/mode/standalone"
 	redis_interface "github.com/atframework/robot-go/redis"
@@ -28,7 +29,7 @@ func NewRobotFlagSet() *flag.FlagSet {
 	flagSet.Bool("help", false, "show help")
 
 	flagSet.String("config", "", "yaml config file path")
-	flagSet.String("mode", "", "run mode: (empty)=standalone, agent, solo")
+	flagSet.String("mode", "", "run mode: (empty)=standalone, agent, solo, dbtool")
 	flagSet.String("case_file", "", "case file path")
 	flagSet.Int("case_file_repeated", 1, "case file repeated time")
 	flagSet.Var(&utils.StringSliceFlag{}, "set", "set variable for case file: --set KEY=VALUE (repeatable)")
@@ -37,6 +38,8 @@ func NewRobotFlagSet() *flag.FlagSet {
 	conn.RegisterFlags(flagSet)
 	// Redis 相关配置
 	redis_interface.RegisterFlags(flagSet)
+	// dbtool 模式
+	dbtool.RegisterFlags(flagSet)
 	// Agent模式
 	agent.RegisterFlags(flagSet)
 	// 单节点压测模式
@@ -157,6 +160,10 @@ func StartRobot(flagSet *flag.FlagSet, unpack user_interface.UserReceiveUnpackFu
 	case "solo":
 		fmt.Println("Starting in Solo mode (single-node stress test)")
 		solo.StartSolo(flagSet)
+		return
+	case "dbtool":
+		fmt.Println("Starting in DBTool mode")
+		dbtool.Start(flagSet)
 		return
 	default:
 		fmt.Println("Starting in Standalone mode")
