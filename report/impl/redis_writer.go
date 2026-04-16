@@ -29,6 +29,9 @@ func NewRedisReportWriter(client *redis.Client, agentID string) *RedisReportWrit
 }
 
 func (w *RedisReportWriter) WriteTracings(reportID string, records []*report.TracingRecord) error {
+	if w.client == nil {
+		return nil
+	}
 	if len(records) == 0 {
 		return nil
 	}
@@ -43,6 +46,9 @@ func (w *RedisReportWriter) WriteTracings(reportID string, records []*report.Tra
 }
 
 func (w *RedisReportWriter) WriteMetrics(reportID string, series []*report.MetricsSeries) error {
+	if w.client == nil {
+		return nil
+	}
 	if len(series) == 0 {
 		return nil
 	}
@@ -57,6 +63,9 @@ func (w *RedisReportWriter) WriteMetrics(reportID string, series []*report.Metri
 }
 
 func (w *RedisReportWriter) WriteMeta(meta *report.ReportMeta) error {
+	if w.client == nil {
+		return nil
+	}
 	data, err := json.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("marshal meta: %w", err)
@@ -79,6 +88,10 @@ func (w *RedisReportWriter) Close() error {
 
 // BarrierACK 当前 agent 向 barrier 集合写入 ACK，表示该 case 步骤执行完成。
 func (w *RedisReportWriter) BarrierACK(reportID string, caseIndex int) error {
+	if w.client == nil {
+		return nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	key := fmt.Sprintf("task:barrier:%s:%d", reportID, caseIndex)
@@ -90,6 +103,10 @@ var _ report.ReportWriter = (*RedisReportWriter)(nil)
 // GenerateUniqueReportID 使用 Redis INCR 生成全局唯一的 ReportID。
 // 格式：{timestamp}-{seq}，其中 seq 由 Redis key "report:id:seq" 自增获得。
 func GenerateUniqueReportID(client *redis.Client) (string, error) {
+	if client == nil {
+		return "", nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	seq, err := client.Incr(ctx, "report:id:seq").Result()

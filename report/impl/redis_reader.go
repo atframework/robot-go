@@ -22,6 +22,10 @@ func NewRedisReportReader(client *redis.Client) *RedisReportReader {
 }
 
 func (r *RedisReportReader) ReadReport(reportID string) (*report.ReportData, error) {
+	if r.client == nil {
+		return nil, fmt.Errorf("redis client is nil")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -80,6 +84,10 @@ func (r *RedisReportReader) ReadReport(reportID string) (*report.ReportData, err
 }
 
 func (r *RedisReportReader) ListReports() ([]*report.ReportMeta, error) {
+	if r.client == nil {
+		return nil, fmt.Errorf("redis client is nil")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -108,6 +116,10 @@ func (r *RedisReportReader) ListReports() ([]*report.ReportMeta, error) {
 
 // BarrierCount 返回指定步骤中已经 ACK 的 agent 数量。
 func (r *RedisReportReader) BarrierCount(reportID string, caseIndex int) (int64, error) {
+	if r.client == nil {
+		return 0, fmt.Errorf("redis client is nil")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	key := fmt.Sprintf("task:barrier:%s:%d", reportID, caseIndex)
@@ -130,6 +142,10 @@ func NewRedisClient(addr, password string) (*redis.Client, error) {
 }
 
 func scanKeys(ctx context.Context, client *redis.Client, pattern string) ([]string, error) {
+	if client == nil {
+		return nil, fmt.Errorf("redis client is nil")
+	}
+
 	var allKeys []string
 	var cursor uint64
 	for {

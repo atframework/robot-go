@@ -152,31 +152,6 @@ curl -X POST http://localhost:8080/api/tasks \
 
 `report_id` 为空时，Master 会通过 Redis INCR 自动生成唯一 ID。
 
-#### 一键部署 Master
-
-Master 提供独立预编译二进制，可通过部署脚本快速下载。
-
-**Linux / macOS：**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/atframework/robot-go/main/deploy-master.sh | bash
-cd robot-master && ./robot-master -config master.yaml
-```
-
-**Windows PowerShell：**
-
-```powershell
-irm https://raw.githubusercontent.com/atframework/robot-go/main/deploy-master.ps1 -OutFile deploy-master.ps1
-.\deploy-master.ps1
-cd robot-master; .\robot-master.exe -config master.yaml
-```
-
-部署脚本自动检测平台、从 GitHub Releases 下载对应二进制和默认配置 `master.yaml`。
-
-支持的平台：`linux-amd64`、`linux-arm64`、`darwin-amd64`、`darwin-arm64`、`windows-amd64`。
-
-> 对仓库打 `v*` Tag 后 GitHub Actions 自动构建并发布到 Releases。
-
 #### Master HTTP API
 
 | Method | Path | 说明 |

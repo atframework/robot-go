@@ -13,6 +13,7 @@ import (
 	user_data "github.com/atframework/robot-go/data"
 	"github.com/atframework/robot-go/report"
 	report_impl "github.com/atframework/robot-go/report/impl"
+	"github.com/redis/go-redis/v9"
 )
 
 // startSolo 以单节点压测模式运行：本地执行压测，数据写入 Redis（Master 可查看），
@@ -34,18 +35,23 @@ func startSolo(flagSet *flag.FlagSet) {
 
 	redisAddr := getFlagString(flagSet, "redis-addr")
 	redisPwd := getFlagString(flagSet, "redis-pwd")
+	enableRedis := redisAddr != ""
 
 	// 连接 Redis
-	redisClient, err := report_impl.NewRedisClient(redisAddr, redisPwd)
-	if err != nil {
-		fmt.Printf("Connect Redis error: %v\n", err)
-		os.Exit(1)
+	var redisClient *redis.Client
+	if enableRedis {
+		redisClient, err := report_impl.NewRedisClient(redisAddr, redisPwd)
+		if err != nil {
+			fmt.Printf("Connect Redis error: %v\n", err)
+			os.Exit(1)
+		}
+		defer redisClient.Close()
 	}
-	defer redisClient.Close()
 
 	// 生成唯一 ReportID
 	reportID := getFlagString(flagSet, "report-id")
 	if reportID == "" {
+		var err error
 		reportID, err = report_impl.GenerateUniqueReportID(redisClient)
 		if err != nil {
 			fmt.Printf("Generate report ID error: %v\n", err)

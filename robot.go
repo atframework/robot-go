@@ -51,7 +51,7 @@ func NewRobotFlagSet() *flag.FlagSet {
 
 	// 分布式模式
 	flagSet.String("mode", "", "run mode: (empty)=standalone, agent, solo")
-	flagSet.String("redis-addr", "localhost:6379", "Redis address for distributed mode")
+	flagSet.String("redis-addr", "", "Redis address for distributed mode")
 	flagSet.String("redis-pwd", "", "Redis password")
 	flagSet.String("master-addr", "", "Master HTTP address (agent mode)")
 	flagSet.String("agent-id", "", "Agent ID (auto-generated if empty)")
