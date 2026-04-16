@@ -42,7 +42,8 @@ func StartSolo(flagSet *flag.FlagSet) {
 	// 连接 Redis
 	var redisClient redis_interface.RedisClient
 	if enableRedis {
-		redisClient, err := redis_interface.NewClient(redis_interface.ParseConfig(flagSet))
+		var err error
+		redisClient, err = redis_interface.NewClient(redis_interface.ParseConfig(flagSet))
 		if err != nil {
 			fmt.Printf("Connect Redis error: %v\n", err)
 			os.Exit(1)
