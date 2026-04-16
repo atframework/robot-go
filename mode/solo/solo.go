@@ -62,8 +62,13 @@ func StartSolo(flagSet *flag.FlagSet) {
 		}
 	}
 
-	log.Printf("[Solo] Starting solo stress test: case=%s repeated=%d reportID=%s redis=%s",
-		caseFile, repeatedTime, reportID, redisAddr)
+	if redisClient == nil {
+		log.Printf("[Solo] Starting solo stress test: case=%s repeated=%d reportID=%s redis disbale",
+			caseFile, repeatedTime, reportID)
+	} else {
+		log.Printf("[Solo] Starting solo stress test: case=%s repeated=%d reportID=%s redis=%s",
+			caseFile, repeatedTime, reportID, redisAddr)
+	}
 
 	// 解析 case 文件
 	content, err := os.ReadFile(caseFile)
