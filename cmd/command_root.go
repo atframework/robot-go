@@ -7,10 +7,8 @@ import (
 var root *utils.CommandNode
 
 func MutableCommandRoot() *utils.CommandNode {
-	if root != nil {
-		return root
+	if root == nil {
+		root = &utils.CommandNode{Children: make(map[string]*utils.CommandNode)}
 	}
-
-	root = &utils.CommandNode{Children: make(map[string]*utils.CommandNode)}
 	return root
 }

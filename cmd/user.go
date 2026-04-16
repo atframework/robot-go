@@ -114,10 +114,10 @@ type UserCommandNode struct {
 var userCommandRoot *UserCommandNode
 
 func MutableUserCommandRoot() *UserCommandNode {
-	if userCommandRoot != nil {
-		return userCommandRoot
+	if userCommandRoot == nil {
+		userCommandRoot = &UserCommandNode{Children: make(map[string]*UserCommandNode)}
 	}
-	return &UserCommandNode{Children: make(map[string]*UserCommandNode)}
+	return userCommandRoot
 }
 
 func RegisterUserCommand(path []string, fn UserCommandFunc, argsInfo string, desc string,
