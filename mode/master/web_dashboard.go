@@ -390,7 +390,7 @@ border-radius:4px;padding:4px 8px;color:var(--text);font-size:12px}
 <!-- Not enabled / loading state -->
 <div id="dbt-disabled" style="display:none;padding:64px;text-align:center">
   <h2 style="color:var(--muted);font-size:20px">DBTool Not Enabled</h2>
-  <p style="color:var(--muted);margin-top:8px">No TableExtractor registered. Call <code>master.RegisterDBToolExtractor(extractor, cfg)</code> before Start().</p>
+  <p style="color:var(--muted);margin-top:8px">No TableExtractor registered. Call <code>RegisterDatabaseTableExtractor</code> and setup DBTOOL config before Start().</p>
 </div>
 
 <!-- Connected: table browser & query -->
