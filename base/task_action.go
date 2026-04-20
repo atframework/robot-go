@@ -200,8 +200,8 @@ func (t *TaskActionBase) Finish(result error) {
 		defer t.finishLock.Unlock()
 
 		t.result = result
-		for _, fn := range t.onFinish {
-			fn(t.Impl, t.result)
+		for index := len(t.onFinish) - 1; index >= 0; index-- {
+			t.onFinish[index](t.Impl, t.result)
 		}
 		t.onFinish = t.onFinish[:0]
 	}
