@@ -68,23 +68,23 @@ type User interface {
 }
 
 type CreateUserFuncType func(openId string, logHandler func(format string, a ...any),
-	enableActorLog bool, unpack UserReceiveUnpackFunc, createMsg UserReceiveCreateMessageFunc,
+	enableActorLog bool, lazyUnmarshal bool, unpack UserReceiveUnpackFunc, createMsg UserReceiveCreateMessageFunc,
 	connectFn conn.NewConnectFunc) User
 
-var createUserFn func(openId string, logHandler func(format string, a ...any), enableActorLog bool, connectFn conn.NewConnectFunc) User
+var createUserFn func(openId string, logHandler func(format string, a ...any), enableActorLog bool, lazyUnmarshal bool, connectFn conn.NewConnectFunc) User
 
 func RegisterCreateUser(f CreateUserFuncType,
 	unpack UserReceiveUnpackFunc, createMsg UserReceiveCreateMessageFunc) {
-	createUserFn = func(openId string, logHandler func(format string, a ...any), enableActorLog bool, connectFn conn.NewConnectFunc) User {
-		return f(openId, logHandler, enableActorLog, unpack, createMsg, connectFn)
+	createUserFn = func(openId string, logHandler func(format string, a ...any), enableActorLog bool, lazyUnmarshal bool, connectFn conn.NewConnectFunc) User {
+		return f(openId, logHandler, enableActorLog, lazyUnmarshal, unpack, createMsg, connectFn)
 	}
 }
 
-func CreateUser(openId string, logHandler func(format string, a ...any), enableActorLog bool) User {
+func CreateUser(openId string, logHandler func(format string, a ...any), enableActorLog bool, lazyUnmarshal bool) User {
 	if createUserFn == nil {
 		return nil
 	}
-	return createUserFn(openId, logHandler, enableActorLog, base.ConnectFunc)
+	return createUserFn(openId, logHandler, enableActorLog, lazyUnmarshal, base.ConnectFunc)
 }
 
 var loginUserCount atomic.Int64

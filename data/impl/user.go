@@ -85,7 +85,7 @@ func NewUser(openId string, c conn.Connection, bufferWriter *log.LogBufferedRota
 }
 
 func CreateUser(openId string, logHandler func(format string, a ...any),
-	enableActorLog bool, unpack user_data.UserReceiveUnpackFunc, createMsg user_data.UserReceiveCreateMessageFunc, connectFn conn.NewConnectFunc, lazyUnmarshal bool) user_data.User {
+	enableActorLog bool, lazyUnmarshal bool, unpack user_data.UserReceiveUnpackFunc, createMsg user_data.UserReceiveCreateMessageFunc, connectFn conn.NewConnectFunc) user_data.User {
 	var bufferWriter *log.LogBufferedRotatingWriter
 	if enableActorLog {
 		bufferWriter, _ = log.NewLogBufferedRotatingWriter(nil,
