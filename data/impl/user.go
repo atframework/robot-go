@@ -43,6 +43,7 @@ type User struct {
 	taskManager             *base.TaskActionManager
 	logHandler              func(format string, a ...any)
 	receiveHandlerCloseChan chan struct{}
+	lazyUnmarshal           bool
 
 	taskActionGuard   sync.Mutex
 	takeActionGuardId atomic.Uint64
@@ -61,7 +62,7 @@ func init() {
 	var _ user_data.User = &User{}
 }
 
-func NewUser(openId string, c conn.Connection, bufferWriter *log.LogBufferedRotatingWriter, logHandler func(format string, a ...any)) *User {
+func NewUser(openId string, c conn.Connection, bufferWriter *log.LogBufferedRotatingWriter, logHandler func(format string, a ...any), lazyUnmarshal bool) *User {
 	var _ user_data.User = &User{}
 	ret := &User{
 		OpenId:                  openId,
@@ -76,6 +77,7 @@ func NewUser(openId string, c conn.Connection, bufferWriter *log.LogBufferedRota
 		messageHandler:          make(map[string]user_data.MessageHandlerFunc),
 		logHandler:              logHandler,
 		receiveHandlerCloseChan: make(chan struct{}, 1),
+		lazyUnmarshal:           lazyUnmarshal,
 	}
 
 	var _ user_data.User = ret
@@ -83,7 +85,7 @@ func NewUser(openId string, c conn.Connection, bufferWriter *log.LogBufferedRota
 }
 
 func CreateUser(openId string, logHandler func(format string, a ...any),
-	enableActorLog bool, unpack user_data.UserReceiveUnpackFunc, createMsg user_data.UserReceiveCreateMessageFunc, connectFn conn.NewConnectFunc) user_data.User {
+	enableActorLog bool, unpack user_data.UserReceiveUnpackFunc, createMsg user_data.UserReceiveCreateMessageFunc, connectFn conn.NewConnectFunc, lazyUnmarshal bool) user_data.User {
 	var bufferWriter *log.LogBufferedRotatingWriter
 	if enableActorLog {
 		bufferWriter, _ = log.NewLogBufferedRotatingWriter(nil,
@@ -97,7 +99,7 @@ func CreateUser(openId string, logHandler func(format string, a ...any),
 		return nil
 	}
 
-	ret := NewUser(openId, c, bufferWriter, logHandler)
+	ret := NewUser(openId, c, bufferWriter, logHandler, lazyUnmarshal)
 	go ret.ReceiveHandler(unpack, createMsg)
 
 	ret.Log("Create User")
@@ -295,6 +297,10 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 			}
 		}
 		task, ok := user.rpcAwaitTask.LoadAndDelete(sequence)
+		message := pu.CreateLazyUnmarshalProtobufMessage(bodyBin, messageType, onUnmarshal)
+		if !user.lazyUnmarshal {
+			message.GetMessage()
+		}
 		if ok {
 			// RPC response
 			task.Resume(&base.TaskActionAwaitData{
@@ -303,7 +309,7 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 			}, &base.TaskActionResumeData{
 				Err: nil,
 				Data: rpcResumeData{
-					body:    pu.CreateLazyUnmarshalProtobufMessage(bodyBin, messageType, onUnmarshal),
+					body:    message,
 					rspCode: errorCode,
 				},
 			})
@@ -312,7 +318,7 @@ func (user *User) ReceiveHandler(unpack user_data.UserReceiveUnpackFunc, createM
 			f, ok := user.messageHandler[rpcName]
 			if ok && f != nil {
 				user.RunTaskDefaultTimeout(func(tau *user_data.TaskActionUser) error {
-					return f(tau, pu.CreateLazyUnmarshalProtobufMessage(bodyBin, messageType, onUnmarshal), errorCode)
+					return f(tau, message, errorCode)
 				}, rpcName)
 			}
 		}
