@@ -245,8 +245,7 @@ func RunCaseInner(
 	}
 
 	var failedCount atomic.Int64
-	var errorBreakTriggered atomic.Bool
-	var caseError error
+	var errorBreakState atomic.Pointer[error]
 
 	// Worker 数量：GOMAXPROCS/2
 	workers := runtime.GOMAXPROCS(0) / 2
@@ -355,8 +354,8 @@ func RunCaseInner(
 					TotalFailedCount.Add(1)
 					task.Log("Case[%s] Failed: %v", caseName, err)
 					if params.ErrorBreak {
-						errorBreakTriggered.Store(true)
-						caseError = err
+						errValue := err
+						errorBreakState.CompareAndSwap(nil, &errValue)
 					}
 				}
 				if adaptiveMode {
@@ -369,7 +368,7 @@ func RunCaseInner(
 			}
 
 			for {
-				if errorBreakTriggered.Load() {
+				if errorBreakState.Load() != nil {
 					return
 				}
 				if ctx.Err() != nil {
@@ -420,6 +419,10 @@ func RunCaseInner(
 	}
 
 	if failedCount.Load() != 0 {
+		var caseError error
+		if errorBreakPtr := errorBreakState.Load(); errorBreakPtr != nil {
+			caseError = *errorBreakPtr
+		}
 		return fmt.Sprintf("Case[%s:%d] Complete With %d Failed, Total Time: %s, Error: %v", caseName, params.CaseIndex, failedCount.Load(), useTime, caseError)
 	}
 	utils.StdoutLog(fmt.Sprintf("Case[%s:%d] All Success, Total Time: %s", caseName, params.CaseIndex, useTime))
