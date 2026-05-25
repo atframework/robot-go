@@ -212,7 +212,7 @@ func (user *User) RunTaskWithoutLock(timeout time.Duration, f func(*user_data.Ta
 }
 
 func (user *User) RunTaskDefaultTimeout(f func(*user_data.TaskActionUser) error, name string) *user_data.TaskActionUser {
-	return user.RunTask(time.Duration(8)*time.Second, f, name)
+	return user.RunTask(user.defaultTaskTimeout, f, name)
 }
 
 type rpcResumeData struct {
