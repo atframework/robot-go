@@ -65,6 +65,7 @@ type User interface {
 
 	GetExtralData(key string) any
 	SetExtralData(key string, value any)
+	SetDefaultTaskTimeout(timeout time.Duration)
 }
 
 type CreateUserFuncType func(openId string, logHandler func(format string, a ...any),

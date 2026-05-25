@@ -36,6 +36,7 @@ type User struct {
 	connection         conn.Connection
 	rpcAwaitTask       *user_data.RPCRingBuffer
 	sendBuf            []byte // 复用的 proto.Marshal 缓冲区，避免每次分配
+	defaultTaskTimeout time.Duration
 
 	csLog *log.LogBufferedRotatingWriter
 
@@ -78,6 +79,7 @@ func NewUser(openId string, c conn.Connection, bufferWriter *log.LogBufferedRota
 		logHandler:              logHandler,
 		receiveHandlerCloseChan: make(chan struct{}, 1),
 		lazyUnmarshal:           lazyUnmarshal,
+		defaultTaskTimeout:      time.Duration(10) * time.Second,
 	}
 
 	var _ user_data.User = ret
@@ -531,4 +533,11 @@ func (user *User) SetExtralData(key string, value any) {
 		user.extralData = make(map[string]any)
 	}
 	user.extralData[key] = value
+}
+
+func (user *User) SetDefaultTaskTimeout(timeout time.Duration) {
+	if user == nil {
+		return
+	}
+	user.defaultTaskTimeout = timeout
 }

@@ -3,6 +3,7 @@ package atsf4g_go_robot_cmd
 import (
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	lu "github.com/atframework/atframe-utils-go/lang_utility"
 	base "github.com/atframework/robot-go/base"
@@ -121,15 +122,15 @@ func MutableUserCommandRoot() *UserCommandNode {
 }
 
 func RegisterUserCommand(path []string, fn UserCommandFunc, argsInfo string, desc string,
-	dynamicComplete readline.DynamicCompleteFunc) {
-	utils.RegisterCommandDefaultTimeout(MutableCommandRoot(), path, func(action base.TaskActionImpl, cmd []string) string {
+	dynamicComplete readline.DynamicCompleteFunc, timeout time.Duration) {
+	utils.RegisterCommand(MutableCommandRoot(), path, func(action base.TaskActionImpl, cmd []string) string {
 		user := GetCurrentUser()
 		if user == nil {
 			return "GetCurrentUser: User nil"
 		}
 		fn(action, user, cmd)
 		return ""
-	}, argsInfo, desc, dynamicComplete)
+	}, argsInfo, desc, dynamicComplete, timeout)
 
 	current := MutableUserCommandRoot()
 	for _, key := range path {
