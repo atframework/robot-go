@@ -1,3 +1,6 @@
 [submodule "third_party/xres-code-generator"]
 	path = third_party/xres-code-generator
 	url = https://github.com/owent/xres-code-generator.git
+[submodule "third_party/mako-generator"]
+	path = third_party/mako-generator
+	url = https://github.com/atframework/generate-for-pb.git
