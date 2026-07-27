@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // varPattern 匹配 ${VAR_NAME} 形式的变量引用
@@ -70,6 +71,50 @@ func ParseLine(cmd []string) (Params, error) {
 	return params, nil
 }
 
+// splitCaseLine supports quoted arguments without applying shell escaping so Windows paths retain their backslashes.
+func splitCaseLine(line string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	var quote rune
+	hasCurrent := false
+
+	flush := func() {
+		if hasCurrent {
+			args = append(args, current.String())
+			current.Reset()
+			hasCurrent = false
+		}
+	}
+
+	for _, character := range line {
+		if quote != 0 {
+			if character == quote {
+				quote = 0
+			} else {
+				current.WriteRune(character)
+			}
+			continue
+		}
+
+		switch {
+		case character == '\'' || character == '"':
+			quote = character
+			hasCurrent = true
+		case unicode.IsSpace(character):
+			flush()
+		default:
+			current.WriteRune(character)
+			hasCurrent = true
+		}
+	}
+
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated quote %q", quote)
+	}
+	flush()
+	return args, nil
+}
+
 // ParseCaseFileContent 解析 case 文件内容，返回混合了控制指令和压测行的统一行列表。
 // 支持 # 注释、行尾 & 后台标记、@ 控制指令前缀。
 // &后台标记的任务知道最后一个非后台标记的任务 OpenIDPrifix 都不能改变
@@ -89,7 +134,10 @@ func ParseCaseFileContent(content string) ([]CaseFileLine, error) {
 			continue
 		}
 
-		args := strings.Fields(line)
+		args, err := splitCaseLine(line)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: parse arguments: %w", len(lines), err)
+		}
 
 		// 检测行尾 & 后台标记
 		background := false

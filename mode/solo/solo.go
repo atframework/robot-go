@@ -22,6 +22,10 @@ func RegisterFlags(flagSet *flag.FlagSet) *flag.FlagSet {
 	return flagSet
 }
 
+func shouldSkipAfterBreakingFailure(line robot_case.CaseFileLine) bool {
+	return !line.IsControl || line.Control.ErrorBreak
+}
+
 // StartSolo 以单节点压测模式运行：本地执行压测，数据写入 Redis（Master 可查看），
 // 压测结束后在当前目录生成 {reportID}.html。
 func StartSolo(flagSet *flag.FlagSet) {
@@ -240,11 +244,11 @@ func StartSolo(flagSet *flag.FlagSet) {
 		return nil
 	}
 
-	errorBreak := false
+	abortRemaining := false
 	for round := 0; round < int(repeatedTime); round++ {
 		for i, line := range lines {
-			if errorBreak {
-				break
+			if abortRemaining && shouldSkipAfterBreakingFailure(line) {
+				continue
 			}
 			caseIndex := round*len(lines) + i
 
@@ -262,7 +266,9 @@ func StartSolo(flagSet *flag.FlagSet) {
 					ch <- bgResult{err: err, caseName: "@" + cp.Name, caseIndex: idx, errorBreak: line.Control.ErrorBreak}
 				}(cp, caseIndex)
 				if !line.BackgroundRunning {
-					errorBreak = waitRunningTask() != nil
+					if waitRunningTask() != nil {
+						abortRemaining = true
+					}
 				}
 				continue
 			}
@@ -281,15 +287,19 @@ func StartSolo(flagSet *flag.FlagSet) {
 				ch <- bgResult{err: err, caseName: params.CaseName, caseIndex: idx, errorBreak: params.ErrorBreak}
 			}(params, caseIndex)
 			if !line.BackgroundRunning {
-				errorBreak = waitRunningTask() != nil
+				if waitRunningTask() != nil {
+					abortRemaining = true
+				}
 			}
 		}
-		if errorBreak {
+		if abortRemaining {
 			break
 		}
 		// 每轮结束时等待剩余后台任务
-		errorBreak = waitRunningTask() != nil
-		if errorBreak {
+		if waitRunningTask() != nil {
+			abortRemaining = true
+		}
+		if abortRemaining {
 			break
 		}
 	}
@@ -329,4 +339,7 @@ func StartSolo(flagSet *flag.FlagSet) {
 
 	// 登出所有用户
 	user_data.LogoutAllUsers()
+	if abortRemaining {
+		os.Exit(1)
+	}
 }

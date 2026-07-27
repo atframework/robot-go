@@ -58,7 +58,11 @@ func runCommandControl(ctx context.Context, args []string) error {
 	}
 
 	command := exec.CommandContext(ctx, args[0], args[1:]...)
-	if err := command.Run(); err != nil {
+	output, err := command.CombinedOutput()
+	if len(output) > 0 {
+		log.Printf("[Control] cmd output:\n%s", output)
+	}
+	if err != nil {
 		return fmt.Errorf("run command %q: %w", args[0], err)
 	}
 	return nil
