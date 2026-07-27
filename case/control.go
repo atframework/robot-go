@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os/exec"
 	"strings"
 )
 
@@ -44,6 +45,24 @@ type ControlParams struct {
 
 // controlMapContainer 控制指令注册表
 var controlMapContainer = make(map[string]ControlAction)
+
+func init() {
+	RegisterControl("cmd", runCommandControl, ControlDispatchAll)
+}
+
+// runCommandControl 以“可执行文件 [参数...]”形式执行外部命令。
+// 不经 shell 解析，参数会按 case 文件拆分后的边界传递给目标程序。
+func runCommandControl(ctx context.Context, args []string) error {
+	if len(args) == 0 || args[0] == "" {
+		return fmt.Errorf("cmd control requires a command: @cmd ErrorBreak command [args...]")
+	}
+
+	command := exec.CommandContext(ctx, args[0], args[1:]...)
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("run command %q: %w", args[0], err)
+	}
+	return nil
+}
 
 // RegisterControl 注册一个控制指令
 // name: 指令名称（不含 @ 前缀，例如 "reboot"、"pprof"）
