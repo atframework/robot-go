@@ -6,24 +6,42 @@ includes:
 tasks:
   submodule_update:
     desc: "Update Submodule"
+    dir: "{{.TASKFILE_DIR}}"
     cmds:
-      - git submodule update --init --recursive
+      - git submodule update --init third_party/xres-code-generator
+      - task: submodule-update-mako-generator
+
+  submodule-update-mako-generator:
+    desc: "Update mako-generator submodule (skipped when an external MAKO_GENERATOR_PY is provided)"
+    dir: "{{.TASKFILE_DIR}}"
+    cmds:
+      - cmd: pwsh -NoProfile -Command "if ('{{.MAKO_GENERATOR_PY}}' -and (Test-Path '{{.MAKO_GENERATOR_PY}}')) { Write-Output 'External mako-generator in use ({{.MAKO_GENERATOR_PY}}), skip submodule init'; exit 0 }; git submodule update --init third_party/mako-generator"
+        platforms: [windows]
+      - cmd: |
+          if [ -n "{{.MAKO_GENERATOR_PY}}" ] && [ -f "{{.MAKO_GENERATOR_PY}}" ]; then
+            echo "External mako-generator in use ({{.MAKO_GENERATOR_PY}}), skip submodule init"
+          else
+            git submodule update --init third_party/mako-generator
+          fi
+        platforms: [linux, darwin]
 
   generate-code:
     desc: "Generate Code"
     vars:
-      PYTHON_BIN_PATH: '{{.PYTHON_BIN_PATH }}'
-      RES_CONFIG_PB: '{{.RES_CONFIG_PB }}'
-      CONFIG_PROTOCOL_IMPORT_PATH: '{{.CONFIG_PROTOCOL_IMPORT_PATH }}'
-      OUTPUT_DIR: '{{.OUTPUT_DIR }}'
+      PYTHON_BIN_PATH: "{{.PYTHON_BIN_PATH }}"
+      RES_CONFIG_PB: "{{.RES_CONFIG_PB }}"
+      CONFIG_PROTOCOL_IMPORT_PATH: "{{.CONFIG_PROTOCOL_IMPORT_PATH }}"
+      OUTPUT_DIR: "{{.OUTPUT_DIR }}"
+      STAGING_DIR: "{{.STAGING_DIR }}"
     cmds:
       - task: config:generate-config-code
         vars:
-          PROJECT_ROOT: '{{.TASKFILE_DIR}}'
+          PROJECT_ROOT: "{{.TASKFILE_DIR}}"
           PYTHON_BIN_PATH: "{{.PYTHON_BIN_PATH}}"
-          XRESLOADER_GEN_PYTHON: '{{.TASKFILE_DIR}}/third_party/xres-code-generator/xrescode-gen.py'
+          XRESLOADER_GEN_PYTHON: "{{.TASKFILE_DIR}}/third_party/xres-code-generator/xrescode-gen.py"
           RES_CONFIG_PB: "{{.RES_CONFIG_PB}}"
           CONFIG_PROTOCOL_IMPORT_PATH: "{{.CONFIG_PROTOCOL_IMPORT_PATH}}"
           OUTPUT_DIR: "{{.OUTPUT_DIR}}"
+          STAGING_DIR: "{{.STAGING_DIR}}"
 
     dir: "{{.TASKFILE_DIR}}"
