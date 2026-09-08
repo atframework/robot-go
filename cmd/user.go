@@ -128,7 +128,10 @@ func RegisterUserCommand(path []string, fn UserCommandFunc, argsInfo string, des
 		if user == nil {
 			return "GetCurrentUser: User nil"
 		}
-		fn(action, user, cmd)
+		err := fn(action, user, cmd)
+		if err != nil {
+			return err.Error()
+		}
 		return ""
 	}, argsInfo, desc, dynamicComplete, timeout)
 
