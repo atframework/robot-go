@@ -228,21 +228,23 @@ func newXXTEACipher(key []byte, params CryptoAlgorithmParams) (*xxteaCipher, err
 		return nil, fmt.Errorf("XXTEA key must be 16 bytes, got %d", len(key))
 	}
 	c := &xxteaCipher{params: params}
-	c.key[0] = binary.LittleEndian.Uint32(key[0:4])
-	c.key[1] = binary.LittleEndian.Uint32(key[4:8])
-	c.key[2] = binary.LittleEndian.Uint32(key[8:12])
-	c.key[3] = binary.LittleEndian.Uint32(key[12:16])
+	// atframe_utils::xxtea_setup reads key words in big-endian order.
+	c.key[0] = binary.BigEndian.Uint32(key[0:4])
+	c.key[1] = binary.BigEndian.Uint32(key[4:8])
+	c.key[2] = binary.BigEndian.Uint32(key[8:12])
+	c.key[3] = binary.BigEndian.Uint32(key[12:16])
 	return c, nil
 }
 
 func (c *xxteaCipher) Encrypt(plaintext, _, _ []byte) ([]byte, error) {
-	// Pad to uint32 alignment (4 bytes), minimum 8 bytes (2 uint32s required by XXTEA).
-	paddedLen := (len(plaintext) + 3) &^ 3
+	// The gateway pads to uint32 alignment with PKCS#7 values before calling XXTEA.
+	padded := blockAlignPad(plaintext, 4)
+	paddedLen := len(padded)
 	if paddedLen < 8 {
 		paddedLen = 8
 	}
 	buf := make([]byte, paddedLen)
-	copy(buf, plaintext)
+	copy(buf, padded)
 
 	v := bytesToUint32sLE(buf)
 	xxteaEncryptBlock(v, c.key)

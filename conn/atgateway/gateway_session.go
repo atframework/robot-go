@@ -195,7 +195,7 @@ func (s *GatewaySession) HandleKeyExchangeRsp(frameData []byte) (confirmFrame []
 		s.ivRollPolicy = GetIVRollPolicy(s.selectedAlgorithm)
 	}
 
-	// Decrypt session token using initialize_crypto IV/AAD (one-shot, separate from main IV chain).
+	// The encrypted session token is the first message in the server's send IV chain.
 	if len(hs.SessionToken) > 0 && s.cipher != nil && hs.InitializeCrypto != nil {
 		s.sessionToken, err = s.cipher.Decrypt(
 			hs.SessionToken, hs.InitializeCrypto.IV, hs.InitializeCrypto.AAD)
@@ -212,8 +212,11 @@ func (s *GatewaySession) HandleKeyExchangeRsp(frameData []byte) (confirmFrame []
 		copy(s.recvIV, baseIV)
 	}
 
-	// The server already used its send IV (= base IV) to encrypt the session token,
-	// so its send IV has been rolled. Advance recvIV to match.
+	// The server can initialize its sending direction independently of the derived IV.
+	if hs.InitializeCrypto != nil && len(hs.InitializeCrypto.IV) > 0 {
+		s.recvIV = append(s.recvIV[:0], hs.InitializeCrypto.IV...)
+	}
+	// Advance past the token before receiving posts that omit their IV.
 	if len(hs.SessionToken) > 0 && s.cipher != nil && len(s.recvIV) > 0 {
 		RollIV(s.ivRollPolicy, s.recvIV, hs.SessionToken)
 	}
@@ -355,7 +358,10 @@ func (s *GatewaySession) decodePostPayload(post *v2.PostInfo) error {
 		if err != nil {
 			return fmt.Errorf("decrypt post: %w", err)
 		}
-		// Roll recv IV to stay in sync with the sender's send IV.
+		// Persist an explicit reset only after successful decryption, then roll from that IV.
+		if len(post.Crypto.IV) > 0 {
+			s.recvIV = append(s.recvIV[:0], post.Crypto.IV...)
+		}
 		RollIV(s.ivRollPolicy, s.recvIV, data)
 		data = decrypted
 	}

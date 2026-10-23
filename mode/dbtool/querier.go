@@ -35,7 +35,7 @@ func (q *Querier) BuildRedisKey(index *TableIndex, keyValues []string) string {
 	parts := make([]string, 0, len(keyValues))
 	parts = append(parts, fmt.Sprintf("%s-%s", q.recordPrefix, index.Name))
 	for _, v := range keyValues {
-		parts[0] = parts[0] + "." + v
+		parts[0] = parts[0] + ":" + v
 	}
 	return parts[0]
 }
