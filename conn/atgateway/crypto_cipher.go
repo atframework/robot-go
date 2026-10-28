@@ -237,23 +237,23 @@ func newXXTEACipher(key []byte, params CryptoAlgorithmParams) (*xxteaCipher, err
 }
 
 func (c *xxteaCipher) Encrypt(plaintext, _, _ []byte) ([]byte, error) {
-	// The gateway pads to uint32 alignment with PKCS#7 values before calling XXTEA.
-	padded := blockAlignPad(plaintext, 4)
-	paddedLen := len(padded)
-	if paddedLen < 8 {
-		paddedLen = 8
+	// Match atframe_utils' 8-byte padding blocks (at least two XXTEA words).
+	padded := blockAlignPad(plaintext, c.params.BlockSize)
+	if len(padded) == 0 {
+		padded = make([]byte, c.params.BlockSize)
+		for i := range padded {
+			padded[i] = byte(len(padded))
+		}
 	}
-	buf := make([]byte, paddedLen)
-	copy(buf, padded)
 
-	v := bytesToUint32sLE(buf)
+	v := bytesToUint32sLE(padded)
 	xxteaEncryptBlock(v, c.key)
 	return uint32sToBytesLE(v), nil
 }
 
 func (c *xxteaCipher) Decrypt(ciphertext, _, _ []byte) ([]byte, error) {
-	if len(ciphertext) < 8 || len(ciphertext)%4 != 0 {
-		return nil, errors.New("XXTEA ciphertext must be >= 8 bytes and 4-byte aligned")
+	if len(ciphertext) == 0 || len(ciphertext)%c.params.BlockSize != 0 {
+		return nil, errors.New("XXTEA ciphertext must be nonempty and 8-byte aligned")
 	}
 	v := bytesToUint32sLE(ciphertext)
 	xxteaDecryptBlock(v, c.key)

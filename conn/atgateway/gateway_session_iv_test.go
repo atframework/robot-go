@@ -58,13 +58,17 @@ func TestReceiveIVContinuesAfterHandshakeAndReset(t *testing.T) {
 				t.Fatal("handshake token differs")
 			}
 			RollIV(GetIVRollPolicy(algorithm), iv, encryptedToken)
-			for packet := 0; packet < 3; packet++ {
+			payloadSizes := []int{48, 48, 48}
+			if algorithm == v2.CryptoXxtea {
+				payloadSizes = []int{0, 1, 2, 3, 4, 5, 7, 8, 9, 48}
+			}
+			for packet, payloadSize := range payloadSizes {
 				var transmittedIV []byte
 				if packet == 1 {
 					iv = bytes.Repeat([]byte{0x73}, params.IVSize)
 					transmittedIV = append([]byte(nil), iv...)
 				}
-				payload := bytes.Repeat([]byte{byte(0x31 + packet)}, 48)
+				payload := bytes.Repeat([]byte{byte(0x31 + packet)}, payloadSize)
 				encrypted, err := serverCipher.Encrypt(payload, iv, aad)
 				if err != nil {
 					t.Fatal(err)
@@ -78,6 +82,23 @@ func TestReceiveIVContinuesAfterHandshakeAndReset(t *testing.T) {
 					t.Fatalf("algorithm %d round %d packet %d: payload differs", algorithm, round, packet)
 				}
 				RollIV(GetIVRollPolicy(algorithm), iv, encrypted)
+				if algorithm == v2.CryptoXxtea {
+					encoded, err := session.EncodePost(payload)
+					if err != nil {
+						t.Fatal(err)
+					}
+					frames, remaining, err := DecodeFrames(encoded)
+					if err != nil || len(frames) != 1 || len(remaining) != 0 {
+						t.Fatalf("decode frame: frames %d, remaining %d, error %v", len(frames), len(remaining), err)
+					}
+					decoded, err := session.DecodeMessage(frames[0])
+					if err != nil {
+						t.Fatal(err)
+					}
+					if decoded.Post == nil || !bytes.Equal(decoded.Post.Data, payload) {
+						t.Fatalf("XXTEA post round %d packet %d: payload differs", round, packet)
+					}
+				}
 			}
 		}
 	}

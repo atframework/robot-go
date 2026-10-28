@@ -22,7 +22,7 @@ type CryptoAlgorithmParams struct {
 func GetCryptoAlgorithmParams(algo v2.CryptoAlgorithmT) (CryptoAlgorithmParams, error) {
 	switch algo {
 	case v2.CryptoXxtea:
-		return CryptoAlgorithmParams{KeySize: 16, IVSize: 0, BlockSize: 4, IsAEAD: false}, nil
+		return CryptoAlgorithmParams{KeySize: 16, IVSize: 0, BlockSize: 8, IsAEAD: false}, nil
 	case v2.CryptoAes128Cbc:
 		return CryptoAlgorithmParams{KeySize: 16, IVSize: 16, BlockSize: 16, IsAEAD: false}, nil
 	case v2.CryptoAes192Cbc:
